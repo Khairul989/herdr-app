@@ -36,11 +36,10 @@ pub static SCRIPT_US: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE: AtomicU64 = AtomicU64::new(0);
 pub static MATERIALIZE_US: AtomicU64 = AtomicU64::new(0);
 
-pub fn note_mods(m: &gpui_shell::metrics::RuntimeMetrics) {
-    SCRIPT_RENDERS.store(m.script_renders(), Relaxed);
-    SCRIPT_US.store(m.script_render_time().as_micros() as u64, Relaxed);
-    MATERIALIZE.store(m.materializations(), Relaxed);
-    MATERIALIZE_US.store(m.materialize_time().as_micros() as u64, Relaxed);
+pub fn note_mods(totals: [u64; 4]) {
+    for (counter, value) in [&SCRIPT_RENDERS, &SCRIPT_US, &MATERIALIZE, &MATERIALIZE_US].into_iter().zip(totals) {
+        counter.store(value, Relaxed);
+    }
 }
 
 /// Adds the time until it's dropped to a counter.

@@ -1331,6 +1331,18 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ShellRoot>> {
+        self.try_load_with_policy(root, crate::policy::default(), window, cx)
+    }
+
+    /// HERDR: a replacement VM keeps the copy's host modules and storage,
+    /// rather than inheriting whichever mod was loaded most recently.
+    pub fn try_load_with_policy(
+        self: &Rc<Self>,
+        root: impl AsRef<Path>,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<ShellRoot>> {
         let root = root.as_ref().to_path_buf();
         let manifest_path = root.join(MANIFEST_FILE);
         let entry = if manifest_path.is_file() {
@@ -1340,7 +1352,7 @@ impl ShellRuntime {
             "main.js".to_owned()
         };
         let root = crate::runtime::resolve_app_root(&root, &entry)?;
-        let policy = Rc::new(crate::policy::default().duplicate());
+        let policy = Rc::new(policy.duplicate());
         let view = load_view_with_policy(self, &root, &entry, policy.clone(), window, cx)?;
         Ok(cx.new(|cx| ShellRoot::with_application(view, root, entry, policy, window, cx)))
     }

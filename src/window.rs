@@ -19,7 +19,7 @@ use crate::terminal::{TerminalEvent, TerminalView};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
-use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
+use gpui_shell::ShellRuntime;
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -281,8 +281,7 @@ struct Copy {
     inst: Instance,
     /// Its number for commands (`mods::prepare_load`); 0 if it never loaded.
     id: u64,
-    root: Option<Entity<ShellRoot>>,
-    _watch: Option<Watcher>,
+    view: Option<mods::ModRuntime>,
     error: Option<String>,
 }
 
@@ -374,6 +373,7 @@ pub struct AppWindow {
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
+    retired_mod_metrics: [u64; 4],
     overlays: Vec<Overlay>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
@@ -477,6 +477,7 @@ impl AppWindow {
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
+            retired_mod_metrics: [0; 4],
             overlays: Vec::new(),
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
@@ -1285,17 +1286,18 @@ impl AppWindow {
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(copy) = self.copies.remove(slot)
-            && let (Some(runtime), Some(root)) = (&self.runtime, copy.root)
+            && let Some(view) = copy.view
         {
-            runtime.close(&root, std::time::Instant::now() + Duration::from_millis(250), window, cx).detach();
+            let metrics = view.metrics();
+            for (total, value) in self.retired_mod_metrics.iter_mut().zip(metrics) { *total = total.saturating_add(value); }
+            view.close(window, cx);
         }
     }
 
     pub(crate) fn close_mods_now(&self, deadline: std::time::Instant, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(runtime) = &self.runtime else { return };
         mods::final_cleanup(self.core.clone(), deadline, || {
-            for root in self.copies.values().filter_map(|copy| copy.root.as_ref()) {
-                runtime.close_now(root, deadline, window, cx);
+            for view in self.copies.values().filter_map(|copy| copy.view.as_ref()) {
+                view.close_now(deadline, window, cx);
             }
         });
     }
@@ -1425,11 +1427,11 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                let copy = self.load(inst, window, cx);
+                let mut copy = self.load(inst, window, cx);
                 if slot.starts_with("float:")
-                    && let Some(root) = &copy.root
+                    && let Some(view) = &mut copy.view
                 {
-                    root.update(cx, |r, cx| r.set_fit_content(true, cx));
+                    view.fit_content(cx);
                 }
                 self.copies.insert(slot, copy);
             }
@@ -1568,19 +1570,14 @@ impl AppWindow {
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
-        let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
-        let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
+        let mut copy = Copy { inst, id: 0, view: None, error: None };
+        let (Some(_), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
         copy.id = mods::prepare_load(&copy.inst);
-        match runtime.try_load(&folder.dir, window, cx) {
-            Ok(root) => {
-                if self.file_events.is_none() {
-                    copy._watch = runtime.watch(&root, window, cx).map_err(|e| tracing::warn!("{}: no hot reload: {e:#}", copy.inst.name)).ok();
-                }
-                copy.root = Some(root);
-            }
+        match mods::ModRuntime::load(&folder.dir, self.file_events.is_none(), window, cx) {
+            Ok(view) => copy.view = Some(view),
             Err(e) => {
                 tracing::warn!("mod {} failed to load: {e:#}", copy.inst.name);
                 copy.error = Some(format!("{e:#}"));
@@ -1598,13 +1595,11 @@ impl AppWindow {
     }
 
     fn refresh_mods_matching(&self, changed: impl Fn(u64) -> bool, cx: &mut Context<Self>) {
-        if let Some(runtime) = &self.runtime {
-            for c in self.copies.values() {
-                if let Some(root) = &c.root
-                    && changed(c.id)
-                {
-                    let _ = runtime.refresh(root, cx);
-                }
+        for copy in self.copies.values() {
+            if let Some(view) = &copy.view
+                && changed(copy.id)
+            {
+                let _ = view.refresh(cx);
             }
         }
     }
@@ -3444,12 +3439,12 @@ impl AppWindow {
             focus.focus(window, cx);
         }
         if layout.is_none() {
-            let copy = self.load(Instance { name, props }, window, cx);
+            let mut copy = self.load(Instance { name, props }, window, cx);
             // Popups (menus) are as tall as what's in them; `height` is the most.
             if fit
-                && let Some(root) = &copy.root
+                && let Some(view) = &mut copy.view
             {
-                root.update(cx, |r, cx| r.set_fit_content(true, cx));
+                view.fit_content(cx);
             }
             self.copies.insert(slot.clone(), copy);
         }
@@ -3691,8 +3686,22 @@ impl AppWindow {
             self.update_status = status;
             self.refresh_mods(cx);
         }
-        if let Some(r) = &self.runtime {
-            crate::bench::note_mods(&r.read_metrics());
+        let mut totals = self.retired_mod_metrics;
+        for view in self.copies.values().filter_map(|copy| copy.view.as_ref()) {
+            for (total, value) in totals.iter_mut().zip(view.metrics()) { *total = total.saturating_add(value); }
+        }
+        crate::bench::note_mods(totals);
+        // The same runtime replacement applies when OS file events are unavailable.
+        if self.file_events.is_none() {
+            for copy in self.copies.values_mut() {
+                if let Some(view) = &mut copy.view {
+                    match view.poll(cx) {
+                        Ok(true) => { copy.error = view.reload(window, cx).err().map(|e| format!("{e:#}")); cx.notify(); }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("{}: no hot reload: {e:#}", copy.inst.name),
+                    }
+                }
+            }
         }
         // With file events the disk is only checked now and then, in case one
         // was missed.
@@ -3748,17 +3757,17 @@ impl AppWindow {
         }
         // Copies that load now (a new folder, a fixed failed load) already run the
         // saved code: reloading them too would start them twice.
-        let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
+        let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.view.is_some()).map(|c| c.id).collect();
         self.sync_folders(window, cx);
-        let Some(runtime) = self.runtime.clone() else { return };
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
-            let Some(root) = &copy.root else { continue };
-            let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
+            let Some(view) = &mut copy.view else { continue };
+            let error = view.reload(window, cx).err().map(|e| format!("{e:#}"));
             if let Some(e) = &error {
                 tracing::warn!("mod reload failed: {e}");
             }
             copy.error = error;
         }
+        cx.notify();
     }
 
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3773,7 +3782,7 @@ impl AppWindow {
         self.folders = found;
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
-        let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
+        let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.view.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
         for slot in &retry {
             self.copies.remove(slot);
         }
@@ -3990,7 +3999,7 @@ impl AppWindow {
         // keyboard is its own (an editor, a board), like a terminal's.
         let in_pane = self.model.tab_of(slot).is_some();
         match self.copies.get(slot) {
-            Some(Copy { root: Some(root), inst, .. }) => div()
+            Some(Copy { view: Some(view), inst, .. }) => div()
                 .size_full()
                 .key_context(format!("Mod mod = {}", inst.name).as_str())
                 .when(in_pane, |d| {
@@ -4027,7 +4036,7 @@ impl AppWindow {
                 // Not cached here: ShellRoot caches the mod's view itself and draws its
                 // spinners over it, waking only itself (GPUI rebuilds all under a cached
                 // view that changed, so a spinner step would rebuild the mod).
-                .map(|d| if in_overlay { d.h_auto().min_h_0().flex().flex_col().child(root.clone()) } else { d.child(root.clone()) })
+                .map(|d| if in_overlay { d.h_auto().min_h_0().flex().flex_col().child(view.root.clone()) } else { d.child(view.root.clone()) })
                 .into_any_element(),
             Some(Copy { error, inst, .. }) => div()
                 .id(SharedString::from(format!("err-{slot}")))

@@ -51,6 +51,9 @@ commands. They're rewritten on every start to match this version.
 - Edits apply at once. If a file is invalid, the app keeps the last good
   version and writes why to `<name>.error` (`layout.error`, `keys.error`,
   `settings.error`, `programs.error`). Check after every edit.
+- Each mod copy has its own script runtime. A successful source reload
+  replaces it and frees the previous module code; a broken save keeps the
+  working copy. Reloading a mod does not restart other mods or CLI sessions.
 - `herdr-app check <mod folder>` loads a mod once and checks its initial
   description and eager native elements, including virtual lists and motion.
   It does not lay out the mod or run deferred rows, nested renders, or later

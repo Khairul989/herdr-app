@@ -132,7 +132,7 @@ pub use runtime::{
 pub use scope::{ScopePhase, with_current_app};
 pub use snapshot::RenderSnapshot;
 pub use view::ScriptView;
-pub use watch::Watcher;
+pub use watch::{SourceWatcher, Watcher};
 
 use std::path::PathBuf;
 

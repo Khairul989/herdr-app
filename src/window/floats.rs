@@ -134,8 +134,8 @@ impl AppWindow {
             (Content::Terminal { .. }, _, Some(t)) => {
                 div().w(settings::z(560.0)).h(settings::z(320.0)).rounded(settings::z(10.0)).overflow_hidden().child(super::shown_terminal(&t.view, cx)).into_any_element()
             }
-            (_, Some(Copy { root: Some(root), inst, .. }), _) => {
-                div().key_context(format!("Mod mod = {}", inst.name).as_str()).child(root.clone()).into_any_element()
+            (_, Some(Copy { view: Some(view), inst, .. }), _) => {
+                div().key_context(format!("Mod mod = {}", inst.name).as_str()).child(view.root.clone()).into_any_element()
             }
             (_, Some(Copy { error: Some(e), inst, .. }), _) => div()
                 .max_w(settings::z(360.0))

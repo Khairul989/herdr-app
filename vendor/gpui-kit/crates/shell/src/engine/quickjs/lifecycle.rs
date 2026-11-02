@@ -1,5 +1,6 @@
 //! Bounded final calls for an application root before its owner removes it.
 use super::*;
+use anyhow::Context as _;
 use crate::ShellRoot;
 use rquickjs::Promise;
 use std::time::{Duration, Instant};
@@ -41,6 +42,19 @@ impl Closing {
 }
 
 impl ShellRuntime {
+    /// HERDR: retire a replaced mod without calling its `close` command, which
+    /// may dismiss the host's overlay. A successful reload already has a new
+    /// root; only the old generation's tasks and native handles must go away.
+    pub fn retire_root(&self, root: &Entity<ShellRoot>, cx: &mut App) -> Result<()> {
+        let view = root.read(cx).application().context("this ShellRoot does not contain a loaded script application")?.view.clone();
+        anyhow::ensure!(std::ptr::eq(view.read(cx).runtime().as_ref(), self), "this ShellRoot belongs to a different gpui-shell runtime");
+        let application = view.read(cx).object().application_generation();
+        if let Some(application) = application {
+            self.release_application_generation(&application, cx);
+        }
+        Ok(())
+    }
+
     fn start_close(
         self: &Rc<Self>, root: &Entity<ShellRoot>, deadline: Instant,
         window: &mut Window, cx: &mut App,

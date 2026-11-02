@@ -21,6 +21,8 @@ include!(concat!(env!("OUT_DIR"), "/frame_mods.rs"));
 mod render_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+mod runtime;
+pub use runtime::ModRuntime;
 
 /// The frame's own mods (welcome, ...): the app's, not the person's. Written
 /// from the binary on every start, so no edit or broken mod can break them.
