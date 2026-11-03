@@ -788,3 +788,104 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+// HERDR: real native focus and keyboard dispatch, including Unicode search and undo.
+#[gpui::test]
+fn editor_shortcuts_search_replace_and_focus(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { Editor, EditorState } from 'gpui-base';
+export default class Probe extends View {
+  init(_props, cx) {
+    this.code = EditorState.new({value: 'é cat CAT\ncat'});
+    this.other = EditorState.new({value: 'second'});
+    this.current = this.code;
+    this.code.on('change', (_e, cx) => cx.notify());
+    this.other.on('change', (_e, cx) => cx.notify());
+    cx.bind_keys([['cmd-f','find'],['cmd-g','next'],['cmd-shift-g','previous'],['cmd-alt-f','replace'],['cmd-shift-r','replace-one'],['ctrl-f','find'],['ctrl-g','next'],['ctrl-shift-g','previous'],['ctrl-h','replace'],['ctrl-shift-r','replace-one'],['ctrl-tab','switch']]
+      .map(([keystroke, action]) => ({keystroke, action:'editor-shortcuts.'+action, context:'EditorShortcuts > Input'})));
+    this.code.focus();
+  }
+  render() {
+    return div().key_context('EditorShortcuts').size_full()
+      .on_action('editor-shortcuts.find', (_e, cx) => {cx.stop_propagation();this.code.set_search_query('cat');cx.notify();})
+      .on_action('editor-shortcuts.next', (_e, cx) => {cx.stop_propagation();this.code.next_search_match();cx.notify();})
+      .on_action('editor-shortcuts.previous', (_e, cx) => {cx.stop_propagation();this.code.previous_search_match();cx.notify();})
+      .on_action('editor-shortcuts.replace', (_e, cx) => {cx.stop_propagation();this.code.replace_search('dog',true);cx.notify();})
+      .on_action('editor-shortcuts.replace-one', (_e, cx) => {cx.stop_propagation();this.code.replace_search('dog');cx.notify();})
+      .on_action('editor-shortcuts.switch', (_e, cx) => {cx.stop_propagation();this.current=this.other;this.other.focus();cx.notify();})
+      .child(Editor.new(this.current).h(200))
+      .child('first='+this.code.value()).child('second='+this.other.value())
+      .child('search='+JSON.stringify(this.code.search_info()));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let context = cx.add_empty_window();
+    let (root, view) = context.update(|window, cx| {
+        let root = runtime.try_load(&staged.0, window, cx).unwrap();
+        let view = root.read(cx).content().clone().downcast::<gpui_shell::ScriptView>().unwrap();
+        (root, view)
+    });
+    context.update(|window, cx| {
+        window.replace_root(cx, |window, cx| gpui_shell::ShellRoot::new(root.clone().into(), window, cx));
+    });
+    let draw = |context: &mut gpui::VisualTestContext| {
+        context.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    let tree = |context: &mut gpui::VisualTestContext| context.update(|_, cx| {
+        assert!(view.read(cx).build_error().is_none(), "{:?}", view.read(cx).build_error());
+        view.read(cx).snapshot().unwrap().debug_tree()
+    });
+    draw(context);
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-f" } else { "ctrl-f" }); draw(context);
+    let found = tree(context);
+    assert!(found.contains("\\\"count\\\":3") && found.contains("\\\"current\\\":1"), "{found}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-g" } else { "ctrl-g" }); draw(context);
+    let next = tree(context); assert!(next.contains("\\\"current\\\":2"), "{next}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-shift-g" } else { "ctrl-shift-g" }); draw(context);
+    let previous = tree(context); assert!(previous.contains("\\\"current\\\":1"), "{previous}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-alt-f" } else { "ctrl-h" }); draw(context);
+    let replaced = tree(context); assert!(replaced.contains("first=é dog dog"), "{replaced}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-z" } else { "ctrl-z" }); draw(context);
+    let undone = tree(context); assert!(undone.contains("first=é cat CAT"), "{undone}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-shift-r" } else { "ctrl-shift-r" }); draw(context);
+    let single = tree(context); assert!(single.contains("first=é dog CAT"), "{single}");
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-z" } else { "ctrl-z" }); draw(context);
+    context.simulate_keystrokes("ctrl-tab"); draw(context);
+    context.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-a x" } else { "ctrl-a x" }); draw(context);
+    let switched = tree(context);
+    assert!(switched.contains("second=x") && switched.contains("first=é cat CAT"), "{switched}");
+}
+
+#[gpui::test]
+fn editor_shortcuts_readonly_and_closed_search(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let entry = staged.0.join("mods/editor-shortcuts");
+    std::fs::create_dir_all(&entry).unwrap();
+    std::fs::write(entry.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { Editor, EditorState } from 'gpui-base';
+export default class Probe extends View {
+  init() {
+    this.code = EditorState.new({value:'cat CAT',readonly:true});
+    let info = this.code.set_search_query('cat',true);
+    if(info.count!==1 || info.current!==1) throw Error('case-sensitive search failed');
+    if(this.code.replace_search('dog',true)!==0 || this.code.value()!=='cat CAT') throw Error('readonly replacement wrote text');
+    info=this.code.set_search_query('absent');
+    if(info.count!==0 || info.current!==null) throw Error('missing query has a match');
+    this.code.close_search();
+    if(this.code.search_info().active) throw Error('closed search stayed active');
+    const released=EditorState.new();released.release();
+    let rejected=false;try { released.search_info(); } catch { rejected=true; }
+    if(!rejected) throw Error('released handle accepted');
+  }
+  render() { return div().child(Editor.new(this.code)).child('readonly search passed'); }
+}
+"#).unwrap();
+    let tree = describe(cx, &staged, "mods/editor-shortcuts", false, Value::Null, updates("current", "current"), None).unwrap();
+    assert!(tree.contains("readonly search passed"), "{tree}");
+}
