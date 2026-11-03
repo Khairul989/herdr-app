@@ -7034,6 +7034,13 @@ globalThis.__gpui = (() => {
           __handle: handle,
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
+          focus: () => __editor_focus(handle),
+          set_search_query: (query, case_sensitive = false) => JSON.parse(__editor_search(handle, "query", String(query), !!case_sensitive)),
+          search_info: () => JSON.parse(__editor_search(handle, "info", "", false)),
+          next_search_match: () => JSON.parse(__editor_search(handle, "next", "", false)),
+          previous_search_match: () => JSON.parse(__editor_search(handle, "previous", "", false)),
+          close_search: () => { __editor_search(handle, "close", "", false); },
+          replace_search: (text, all = false) => __editor_replace_search(handle, String(text), !!all),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),
         };

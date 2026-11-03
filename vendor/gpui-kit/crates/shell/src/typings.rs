@@ -3141,7 +3141,27 @@ const BASE: &str = r#"  /** A row. */
   export const Textarea: { new: (state: TextareaState) => NativeElement };
 
   // HERDR: built-in source editing and read-only code viewing.
+  export interface EditorSearchInfo {
+    query: string;
+    active: boolean;
+    count: number;
+    /** One-based match number; null without matches. */
+    current: number | null;
+    case_sensitive: boolean;
+  }
   export interface EditorState {
+    /** Focus the editor after opening or switching a file. */
+    focus(): void;
+    /** Literal search with native highlights. Defaults to ignoring case. */
+    set_search_query(query: string, case_sensitive?: boolean): EditorSearchInfo;
+    /** Read the current match count; legal during render. */
+    search_info(): EditorSearchInfo;
+    /** Select and reveal a match, wrapping at the ends. */
+    next_search_match(): EditorSearchInfo;
+    previous_search_match(): EditorSearchInfo;
+    close_search(): void;
+    /** Replace the current match or every match as an undoable edit. Readonly editors return zero. */
+    replace_search(text: string, all?: boolean): number;
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;

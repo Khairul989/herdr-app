@@ -895,6 +895,12 @@ or editor with syntax highlighting, line numbers and folding. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
+Editors expose `focus()` for file switching and native literal search:
+`set_search_query(text, case_sensitive?)`, `search_info()`,
+`next_search_match()`, `previous_search_match()`, and `close_search()`.
+Mods draw the search bar; native code highlights and reveals matches.
+`replace_search(text, all?)` makes undoable replacements (zero in readonly editors).
+
 ### The `herdr` module
 
 All of it is in `herdr.d.ts`. In short:

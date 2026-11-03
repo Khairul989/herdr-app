@@ -497,6 +497,55 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    // HERDR: keep search state and undo inside the native editor; mods own the search bar.
+    let focus_editor = runtime.clone();
+    globals.set("__editor_focus", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+        refuse_mutation_in_render(&ctx, "EditorState.focus()")?;
+        let editor = live_editor(&ctx, &focus_editor, handle)?;
+        scope::with_current(|window, cx| editor.update(cx, |state, cx| state.focus(window, cx)))
+            .ok_or_else(|| needs_call(&ctx, "EditorState.focus()"))
+    }))?;
+
+    let search_editor = runtime.clone();
+    globals.set("__editor_search", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, operation: String, query: String, case_sensitive: bool| -> JsResult<String> {
+        if operation != "info" { refuse_mutation_in_render(&ctx, "EditorState search")?; }
+        let editor = live_editor(&ctx, &search_editor, handle)?;
+        scope::with_current_app(|cx| {
+            editor.update(cx, |state, cx| {
+                let selected = match operation.as_str() {
+                    "query" => {
+                        let changed = state.search_session().query != query || state.search_session().case_insensitive != !case_sensitive;
+                        state.set_search_query(query, !case_sensitive, cx);
+                        if changed {
+                            state.previous_search_match(cx);
+                            state.next_search_match(cx)
+                        } else { None }
+                    }
+                    "next" => state.next_search_match(cx),
+                    "previous" => state.previous_search_match(cx),
+                    "close" => { state.close_search(cx); None }
+                    "info" => None,
+                    _ => return Err(Exception::throw_type(&ctx, "unknown editor search operation")),
+                };
+                if let Some(range) = selected { state.set_selected_range(range, cx); }
+                let session = state.search_session();
+                Ok(serde_json::json!({"query": session.query, "active": session.is_active(),
+                    "count": session.matcher.len(), "current": session.matcher.current().map(|index| index + 1),
+                    "case_sensitive": !session.case_insensitive}).to_string())
+            })
+        }).ok_or_else(|| needs_call(&ctx, "EditorState search"))?
+    }))?;
+
+    let replace_editor = runtime.clone();
+    globals.set("__editor_replace_search", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, replacement: String, all: bool| -> JsResult<usize> {
+        refuse_mutation_in_render(&ctx, "EditorState.replace_search()")?;
+        let editor = live_editor(&ctx, &replace_editor, handle)?;
+        scope::with_current(|window, cx| editor.update(cx, |state, cx| {
+            if all { state.replace_all_search_matches(&replacement, window, cx) }
+            else { usize::from(state.replace_current_search_match(&replacement, window, cx)) }
+        })).ok_or_else(|| needs_call(&ctx, "EditorState.replace_search()"))
+    }))?;
+
     let subscribe_editor = runtime.clone();
     globals.set(
         "__editor_on",
