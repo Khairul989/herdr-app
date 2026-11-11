@@ -87,7 +87,7 @@ Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any 
 
 Installed releases check for updates in the background and download a new app beside the running one. It takes over when you quit and reopen, or choose the update action. Your terminals keep running in the core.
 Settings → Updates shows what is available. What's New opens after an update; you can open it again from the command palette.
-Builds from source do not update themselves.
+Builds from source do not update themselves, but still offer herdr-core updates.
 
 Usage telemetry is on by default in releases. Turn it off in Settings → Privacy.
 Mods are trusted code, not sandboxed extensions. Read [security and privacy](docs/security.md) before installing someone else's mod.

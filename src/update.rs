@@ -6,13 +6,14 @@
 //! quit, or before opening the next window after a crash. The first start
 //! after a swap runs `hc update` for the core.
 //!
-//! A build from source never updates: only `scripts/package` (the release
-//! builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
+//! A build from source never updates itself: only `scripts/package` (the
+//! release builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
 //! Herdr.app too, so the install's shape alone can't tell.
 //!
-//! The core is checked on the same clock (`core/latest.json`): a newer core
-//! of the same generation is offered (also applied after an app update), unless
-//! a package manager owns it. Within a generation a newer core only adds.
+//! The core is checked on the same clock (`core/latest.json`), by every build:
+//! a source-built app still runs the released core. A newer core of the same
+//! generation is offered (also applied after an app update), unless a package
+//! manager owns it. Within a generation a newer core only adds.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -120,9 +121,10 @@ fn checks_app() -> Option<PathBuf> {
     root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
 }
 
-/// A release build checks the core; a source build only when pointed at a test release server.
+/// Every build checks the core: a source build runs the released core too,
+/// and only a newer core (e.g. the macOS privacy bundle) reaches it.
 fn checks_core() -> bool {
-    option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
+    true
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.
@@ -623,6 +625,15 @@ pub fn after_update() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_build_still_checks_the_core() {
+        // cargo test is a source build: no HERDR_APP_RELEASE.
+        assert!(option_env!("HERDR_APP_RELEASE").is_none());
+        assert!(std::env::var_os("HERDR_RELEASES_URL").is_none());
+        assert!(checks_app().is_none());
+        assert!(checks_core());
+    }
 
     #[test]
     fn failed_check_clears_success_and_recovery_records_a_new_time() {
