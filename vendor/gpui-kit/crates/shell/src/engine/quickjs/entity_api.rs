@@ -1254,6 +1254,16 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let scroll_metrics = runtime.clone();
+    globals.set("__virtual_scroll_metrics", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<String> {
+        let scroll = live_virtual_scroll(&ctx, &scroll_metrics, handle)?;
+        Ok(serde_json::json!({
+            "offsetY": f32::from(-scroll.offset().y),
+            "maxOffsetY": f32::from(scroll.max_offset().y),
+            "viewportHeight": f32::from(scroll.bounds().size.height),
+        }).to_string())
+    }))?;
+
     let discard_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_release",

@@ -6519,6 +6519,7 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    metrics: () => JSON.parse(__virtual_scroll_metrics(handle)),
     release: () => __virtual_scroll_release(handle),
   });
 

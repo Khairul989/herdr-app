@@ -3018,6 +3018,9 @@ const BASE: &str = r#"  /** A row. */
      */
     scroll_to_item(index: number, strategy?: "top" | "center"): void;
     scroll_to_bottom(): void;
+    /** Actual laid-out scroll position, in logical pixels. Offsets increase downward.
+     * viewportHeight is zero until the list has been laid out. Read-only; legal from render. */
+    metrics(): { offsetY: number; maxOffsetY: number; viewportHeight: number };
     /** Releases the handle. Using it afterwards throws. */
     release(): boolean;
   }

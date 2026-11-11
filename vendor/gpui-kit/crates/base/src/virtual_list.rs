@@ -33,6 +33,7 @@ struct VirtualListScrollHandleState {
     /// Content bounds size (excluding padding and border) from the last frame.
     last_content_size: Option<Size<Pixels>>,
     pub deferred_scroll_to_item: Option<DeferredScrollToItem>,
+    pub deferred_scroll_to_bottom: bool,
 }
 
 /// A scroll handle for [`VirtualList`].
@@ -93,6 +94,7 @@ impl VirtualListScrollHandle {
                 items_count: 0,
                 last_content_size: None,
                 deferred_scroll_to_item: None,
+                deferred_scroll_to_bottom: false,
             })),
             base_handle: ScrollHandle::default(),
         }
@@ -111,6 +113,7 @@ impl VirtualListScrollHandle {
     /// Scroll to the item at the given index, with an additional offset items.
     fn scroll_to_item_with_offset(&self, ix: usize, strategy: ScrollStrategy, offset: usize) {
         let mut state = self.state.borrow_mut();
+        state.deferred_scroll_to_bottom = false;
         state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
@@ -121,8 +124,9 @@ impl VirtualListScrollHandle {
 
     /// Scrolls to the bottom of the list.
     pub fn scroll_to_bottom(&self) {
-        let items_count = self.state.borrow().items_count;
-        self.scroll_to_item(items_count.saturating_sub(1), ScrollStrategy::Top);
+        let mut state = self.state.borrow_mut();
+        state.deferred_scroll_to_item = None;
+        state.deferred_scroll_to_bottom = true;
     }
 }
 
@@ -638,6 +642,14 @@ impl Element for VirtualList {
         scroll_state.last_content_size = Some(content_bounds.size);
 
         let mut scroll_offset = self.scroll_handle.offset();
+        // Align the content edge, including when the final item exceeds the viewport.
+        if std::mem::take(&mut scroll_state.deferred_scroll_to_bottom) {
+            if axis.is_vertical() {
+                scroll_offset.y = content_bounds.size.height - layout.size_layout.content_size.height;
+            } else {
+                scroll_offset.x = content_bounds.size.width - layout.size_layout.content_size.width;
+            }
+        }
         if let Some(scroll_to_item) = scroll_state.deferred_scroll_to_item.take() {
             scroll_offset = self.scroll_to_deferred_item(
                 scroll_offset,

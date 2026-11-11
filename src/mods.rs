@@ -1498,3 +1498,45 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+#[cfg(test)]
+mod scroll_position_tests {
+    use gpui::{prelude::*, Context, IntoElement, Render, ScrollStrategy, TestAppContext, Window, div, point, px, size};
+    use gpui_base::{VirtualListScrollHandle, v_virtual_list};
+    use std::rc::Rc;
+
+    struct ListScene { scroll: VirtualListScrollHandle }
+    impl Render for ListScene {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let sizes = Rc::new((0..20).map(|i| size(px(10.), px(if i == 19 { 1000. } else { 20. }))).collect::<Vec<_>>());
+            v_virtual_list(cx.entity(), "scroll-regression", sizes.clone(), move |_, range, _, _| {
+                range.map(|i| div().w(sizes[i].width).h(sizes[i].height)).collect::<Vec<_>>()
+            }).track_scroll(&self.scroll).w(px(60.)).h(px(60.))
+        }
+    }
+
+    #[gpui::test]
+    fn bottom_tracks_actual_offset_with_a_tall_final_item(cx: &mut TestAppContext) {
+        let scroll = VirtualListScrollHandle::new();
+        let (_, cx) = cx.add_window_view({
+            let scroll = scroll.clone();
+            move |_, _| ListScene { scroll }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        scroll.scroll_to_bottom();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        scroll.scroll_to_item(19, ScrollStrategy::Top);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(scroll.max_offset().y + scroll.offset().y > px(500.));
+        scroll.scroll_to_bottom();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+        // Scrollbar dragging and wheel input both update the base handle.
+        scroll.base_handle().set_offset(point(px(0.), px(-100.)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(scroll.max_offset().y + scroll.offset().y > px(500.));
+        scroll.base_handle().set_offset(point(px(0.), -scroll.max_offset().y));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(scroll.offset().y, -scroll.max_offset().y);
+    }
+}

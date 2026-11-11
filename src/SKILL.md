@@ -97,6 +97,8 @@ those files or the generated guide. The app rewrites them on start.
   Discover required arguments with `herdr-app commands`.
 - Source editor mods can use `EditorState.focus()` and native search/replace
   methods from `gpui-kit.d.ts`; the mod draws the search controls.
+- Virtual lists expose actual scroll position through `VirtualListScrollHandle.metrics()`;
+  compare `offsetY` with `maxOffsetY` after `viewportHeight` becomes positive.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.

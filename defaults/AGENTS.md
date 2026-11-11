@@ -45,6 +45,8 @@ https://gpui-kit.com. The Herdr app carries its own copy with additions
 (`frames`, `loop`), so **the type files here are the truth**:
 `gpui-kit.d.ts` for elements and `herdr.d.ts` for the app's data and
 commands. They're rewritten on every start to match this version.
+For virtual lists, `VirtualListScrollHandle.metrics()` reports the actual scroll
+offset, limit and viewport height, so controls can detect reaching the bottom.
 
 ## Changing things safely
 
