@@ -3,7 +3,7 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +18,7 @@ pub const CLOSE: u8 = 2;
 pub const RESIZE: u8 = 3;
 pub const FOCUS: u8 = 4;
 pub const FACTS: u8 = 5;
+pub const AUTOMATIC_INPUT: u8 = 6;
 
 pub enum Stream {
     Data(Vec<u8>),
@@ -74,6 +75,34 @@ impl EventLines {
     pub fn live(&self) -> Value {
         let live: Vec<&Value> = self.terminals.iter().filter(|t| t["state"] == "live").collect();
         json!({ "terminals": live })
+    }
+
+    /// Parent references from cores may still use host names. All app
+    /// consumers need the same addresses as the terminal records themselves.
+    pub fn live_for(&self, hello: &Value, machines: &Value) -> Value {
+        let mut live = self.live();
+        for terminal in live["terminals"].as_array_mut().into_iter().flatten() {
+            let Some(parent) = terminal["parent"].as_str() else { continue };
+            let Some((prefix, id)) = parent.split_once('/') else { continue };
+            let local = [hello["core"]["id"].as_str(), hello["core"]["name"].as_str()].contains(&Some(prefix));
+            if local {
+                terminal["parent"] = id.into();
+                continue;
+            }
+            let known = machines["machines"].as_array().into_iter().flatten();
+            // Preserve normalized names before considering a core's host name.
+            let machine = known.clone().find(|m| m["name"] == prefix || m["id"] == prefix)
+                .or_else(|| {
+                    let mut hosts = known.filter(|m| m["host"] == prefix);
+                    match (hosts.next(), hosts.next()) {
+                        (Some(machine), None) => Some(machine),
+                        _ => None,
+                    }
+                });
+            let Some(name) = machine.and_then(|m| m["name"].as_str()) else { continue };
+            terminal["parent"] = format!("{name}/{id}").into();
+        }
+        live
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> Pushed {
@@ -167,6 +196,7 @@ impl EventLines {
 #[derive(Default)]
 struct Routes {
     closed: bool,
+    automatic_input: HashSet<u32>,
     replies: HashMap<u64, mpsc::Sender<Result<Value, Value>>>,
     streams: HashMap<u32, async_channel::Sender<Stream>>,
     /// Frames for a channel whose attach reply hasn't been handled yet.
@@ -270,6 +300,26 @@ fn read_frame(r: &mut impl Read) -> Option<(u32, u8, Vec<u8>)> {
     Some((channel, h[4], payload))
 }
 
+#[derive(Debug)]
+pub struct ConnectError(pub String);
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConnectError {}
+
+fn connect_error(stderr: &str) -> Option<ConnectError> {
+    let reply: Value = serde_json::from_str(stderr.trim()).ok()?;
+    let error = reply.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    Some(ConnectError(match error.get("hint").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(hint) => format!("{message}\n\n{hint}"),
+        None => message.to_owned(),
+    }))
+}
+
 impl Core {
     /// Connects to the user's core (starting it if needed) and switches to framed mode.
     pub fn connect() -> Result<Arc<Core>> {
@@ -277,15 +327,38 @@ impl Core {
             .arg("connect")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .context("cannot run `hc connect`: is herdr-core installed?")?;
+        let mut stderr = child.stderr.take().unwrap();
+        let (error_tx, errors) = mpsc::channel();
+        std::thread::Builder::new().name("hc-stderr".into()).spawn(move || {
+            let mut captured = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while let Ok(n) = stderr.read(&mut buffer) {
+                if n == 0 { break; }
+                let _ = std::io::stderr().write_all(&buffer[..n]);
+                captured.extend_from_slice(&buffer[..n.min(65536 - captured.len())]);
+            }
+            let _ = error_tx.send(String::from_utf8_lossy(&captured).into_owned());
+        })?;
         let mut stdin = child.stdin.take().unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
-        stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let hello: Value = serde_json::from_str(&line).context("bad hello reply from core")?;
+        let hello = (|| -> Result<Value> {
+            stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            serde_json::from_str(&line).context("bad hello reply from core")
+        })();
+        let hello = match hello {
+            Ok(hello) => hello,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(error) = connect_error(&errors.recv_timeout(Duration::from_secs(1)).unwrap_or_default()) { return Err(error.into()); }
+                return Err(error);
+            }
+        };
         if let Some(err) = hello.get("error") {
             bail!("core refused hello: {err}");
         }
@@ -337,12 +410,14 @@ impl Core {
                     None => r.early.entry(channel).or_default().push(item),
                 }
                 if closing {
+                    r.automatic_input.remove(&channel);
                     r.streams.remove(&channel);
                 }
             }
             // The core went away: tell every pane, and fail calls still waiting.
             let mut r = routes.lock().unwrap();
             r.closed = true;
+            r.automatic_input.clear();
             for (_, tx) in r.streams.drain() {
                 let _ = tx.try_send(Stream::Lost);
             }
@@ -388,9 +463,14 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>) -> Result<String> {
+    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
         let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        let r = self.call("terminal.run", json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true}))?;
+        let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
+        // Released cores ignore unknown parameters, including when forwarding to another machine.
+        if let Some((cols, rows)) = size {
+            params["size"] = json!({"cols": cols, "rows": rows});
+        }
+        let r = self.call("terminal.run", params)?;
         r.get("address")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -423,12 +503,23 @@ impl Core {
             let _ = tx.try_send(item);
         }
         r.streams.insert(channel, tx);
+        if self.hello["features"].as_array().is_some_and(|features| features.iter().any(|f| f == "automatic_input")) && result["automatic_input"] == true {
+            r.automatic_input.insert(channel);
+        }
         Ok(Attached { channel, stream: rx, terminal: result["terminal"].clone() })
     }
 
     pub fn input(&self, channel: u32, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.send(channel, DATA, bytes);
+        }
+    }
+
+    /// Terminal-engine replies are not typing. Older paths require legacy DATA.
+    pub fn automatic_input(&self, channel: u32, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            let kind = if self.routes.lock().unwrap().automatic_input.contains(&channel) { AUTOMATIC_INPUT } else { DATA };
+            self.send(channel, kind, bytes);
         }
     }
 
@@ -453,7 +544,10 @@ impl Core {
     }
 
     pub fn detach(&self, channel: u32) {
-        self.routes.lock().unwrap().streams.remove(&channel);
+        let mut routes = self.routes.lock().unwrap();
+        routes.streams.remove(&channel);
+        routes.automatic_input.remove(&channel);
+        drop(routes);
         self.send(channel, CLOSE, &[]);
     }
 }
@@ -467,9 +561,38 @@ impl Drop for Core {
     }
 }
 
+/// A core that is never there, for tests that open the window: every call
+/// fails at once, and it never reports the loss (so nothing reconnects).
+#[cfg(test)]
+pub fn offline() -> Arc<Core> {
+    let (writer, frames) = mpsc::channel();
+    std::mem::forget(frames);
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    Arc::new(Core {
+        hello: Value::Null,
+        writer,
+        routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
+        next_id: AtomicU64::new(1),
+        child: Mutex::new(child),
+        lost,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_errors_keep_the_cores_message_and_recovery_hint() {
+        let stderr = json!({"error": {
+            "kind": "unavailable", "message": "the core pipe cannot be accessed",
+            "hint": "stop it with hc server stop in an elevated terminal"
+        }}).to_string();
+        assert_eq!(connect_error(&stderr).unwrap().to_string(), "the core pipe cannot be accessed\n\nstop it with hc server stop in an elevated terminal");
+        assert!(connect_error("not JSON").is_none());
+    }
 
     #[test]
     fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {
@@ -517,6 +640,37 @@ mod tests {
     }
 
     #[test]
+    fn parent_addresses_match_the_viewing_cores_terminal_addresses() {
+        let lines = EventLines::new(&json!({"terminals": [
+            {"address": "beta/t2", "state": "live", "parent": "host-local/t1"},
+            {"address": "beta/t3", "state": "live", "parent": "host-alpha/t4"},
+            {"address": "beta/t6", "state": "live", "parent": "t7"},
+            {"address": "t10", "state": "live", "parent": "alpha-id/t4"},
+            {"address": "t11", "state": "live", "parent": "local-id/t1"},
+            {"address": "t12", "state": "live", "parent": "alpha/t4"},
+            {"address": "t13", "state": "live", "parent": "unknown/t1"},
+            {"address": "t14", "state": "live", "parent": null},
+            {"address": "t15", "state": "live", "parent": "shared-host/t4"},
+            {"address": "t16", "state": "live", "parent": "beta/t4"}
+        ]}));
+        let hello = json!({"core": {"id": "local-id", "name": "host-local"}});
+        let machines = json!({"machines": [
+            {"name": "alpha", "id": "alpha-id", "host": "host-alpha"},
+            {"name": "beta", "id": "beta-id", "host": "host-beta"},
+            {"name": "gamma", "id": "gamma-id", "host": "shared-host"},
+            {"name": "delta", "id": "delta-id", "host": "shared-host"},
+            {"name": "epsilon", "id": "epsilon-id", "host": "beta"}
+        ]});
+        let parents = |machines: &Value| lines.live_for(&hello, machines)["terminals"].as_array().unwrap()
+            .iter().map(|t| t["parent"].clone()).collect::<Vec<_>>();
+        assert_eq!(parents(&machines), vec![
+            json!("t1"), json!("alpha/t4"), json!("t7"), json!("alpha/t4"),
+            json!("t1"), json!("alpha/t4"), json!("unknown/t1"), Value::Null,
+            json!("shared-host/t4"), json!("beta/t4"),
+        ]);
+    }
+
+    #[test]
     fn document_and_missed_events_survive_arbitrary_frame_boundaries() {
         for line in [b"{\"method\":\"event\",\"params\":{\"type\":\"doc\"}}\n".as_slice(), b"{\"method\":\"missed\",\"params\":{\"terminals\":[]}}\n".as_slice()] {
             for at in 1..line.len() {
@@ -553,6 +707,116 @@ mod tests {
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(core.routes.lock().unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn run_sends_initial_size_and_display_together() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        let routes = core.routes.clone();
+        let display = json!({"fg": "#25272c", "bg": "#ffffff", "cursor": "#25272c", "cell": [9, 18]});
+        let expected = display.clone();
+        let peer = std::thread::spawn(move || {
+            let frame = frames.recv().unwrap();
+            let request: Value = serde_json::from_slice(&frame[HEADER..]).unwrap();
+            assert_eq!(request["method"], "terminal.run");
+            assert_eq!(request["params"]["size"], json!({"cols": 80, "rows": 24}));
+            assert_eq!(request["params"]["display"], expected);
+            routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()).unwrap()
+                .send(Ok(json!({"address": "t1"}))).unwrap();
+        });
+        assert_eq!(core.run(vec![], None, json!({}), None, Some((80, 24)), display).unwrap(), "t1");
+        peer.join().unwrap();
+    }
+
+    #[test]
+    fn replies_are_tagged_only_on_capable_attach_channels() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        core.routes.lock().unwrap().automatic_input.insert(7);
+        core.automatic_input(7, b"\x1b");
+        core.automatic_input(7, b"[48;24;80t");
+        core.input(7, b"x");
+        core.automatic_input(8, b"old core reply");
+        core.automatic_input(7, b"");
+        let sent: Vec<_> = frames.try_iter().map(|frame| (frame[4], frame[HEADER..].to_vec())).collect();
+        assert_eq!(sent, vec![
+            (AUTOMATIC_INPUT, b"\x1b".to_vec()),
+            (AUTOMATIC_INPUT, b"[48;24;80t".to_vec()),
+            (DATA, b"x".to_vec()),
+            (DATA, b"old core reply".to_vec()),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated HC_SESSION=test-* and a running hc on PATH"]
+    fn two_app_viewers_answer_queries_without_idle_size_theft() {
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
+        let root = std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Core::connect().unwrap();
+        let program = format!(
+            "stty raw -echo; cat </dev/tty > {0}/received & printf ready; for n in 0 1 2; do \
+             while [ ! -e {0}/query$n ]; do sleep 0.02; done; \
+             printf '\\033[?2048l\\033[?2048h\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; done; wait",
+            root.display()
+        );
+        let result = core.call("terminal.run", json!({"argv": ["sh", "-c", program]})).unwrap();
+        let t = result["address"].as_str().unwrap();
+        let idle = core.attach(t, 80, 24, json!({})).unwrap();
+        let leader = core.attach(t, 100, 30, json!({})).unwrap();
+        let capable = core.routes.lock().unwrap().automatic_input.contains(&idle.channel);
+        let mut idle_vt = crate::vt::Vt::new(80, 24);
+        let mut leader_vt = crate::vt::Vt::new(100, 30);
+        idle_vt.resize(80, 24, 10, 20);
+        leader_vt.resize(100, 30, 10, 20);
+        for round in 0..3 {
+            std::fs::write(root.join(format!("query{round}")), "").unwrap();
+            for (name, viewer, vt, expected) in [
+                ("idle", &idle, &mut idle_vt, if capable { 100 } else { 80 }),
+                ("leader", &leader, &mut leader_vt, 100),
+            ] {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut replies = Vec::new();
+                while !replies.windows(3).any(|w| w == b";OK") {
+                    assert!(std::time::Instant::now() < deadline, "query never reached {name}");
+                    match viewer.stream.try_recv() {
+                        Ok(Stream::Data(bytes)) => {
+                            vt.write(&bytes);
+                            core.credit(viewer.channel, bytes.len());
+                            replies.extend(vt.take_replies());
+                        }
+                        Ok(_) => panic!("viewer disconnected"),
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+                core.automatic_input(viewer.channel, &replies);
+                let size = core.call("terminal.get", json!({"terminal": t})).unwrap();
+                eprintln!("round {round} {name}: {}x{}, replies {:?}", size["cols"], size["rows"], String::from_utf8_lossy(&replies));
+                assert_eq!(size["cols"], expected);
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let received = std::fs::read(root.join("received")).unwrap_or_default();
+            if received.windows(3).filter(|w| *w == b";OK").count() == 6 {
+                eprintln!("program received six kitty replies (two per query): {:?}", String::from_utf8_lossy(&received));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        core.call("terminal.kill", json!({"terminal": t})).unwrap();
     }
 
     fn hello(generation: u64, version: &str, methods: &[&str]) -> Value {

@@ -187,10 +187,10 @@ impl CosmicTextSystem {
 
 impl PlatformTextSystem for CosmicTextSystem {
     fn glyph_uses_foreground(&self, params: &RenderGlyphParams) -> bool {
-        let mut state = self.0.write();
         if !params.is_emoji {
             return false;
         }
+        let mut state = self.0.write();
         let key = (
             params.glyph_id.0,
             (f32::from(params.font_size) * params.scale_factor).to_bits(),
@@ -272,6 +272,14 @@ impl PlatformTextSystem for CosmicTextSystem {
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
         self.0.write().prewarm_fonts(font_ids);
+    }
+
+    fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
+        let state = self.0.read();
+        let font = &state.loaded_font(font_id).font;
+        let index = state.font_system.db().face(font.id())?.index;
+        let face = ttf_parser::RawFace::parse(font.data(), index).ok()?;
+        Some(face.table(ttf_parser::Tag::from_bytes(&tag))?.to_vec())
     }
 
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
@@ -610,6 +618,17 @@ impl CosmicTextSystemState {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = f32::from(params.font_size);
+        let glyph_id: u16 = params.glyph_id.0.try_into()?;
+        let pixels_per_em = (pixel_size * params.scale_factor) as u16;
+
+        // HERDR: Swash panics decoding alpha bitmaps with zero width or height.
+        if !params.is_emoji
+            && alpha_bitmap(font_ref, glyph_id, pixels_per_em).is_some_and(|bitmap| {
+                bitmap.pixels_per_em == pixels_per_em && (bitmap.width == 0 || bitmap.height == 0)
+            })
+        {
+            return Ok(swash::scale::image::Image::new());
+        }
 
         if params.is_emoji
             && let Some(image) = crate::colr::render_with_foreground(
@@ -658,7 +677,6 @@ impl CosmicTextSystemState {
             renderer.format(Format::Alpha).offset(subpixel_offset);
         }
 
-        let glyph_id: u16 = params.glyph_id.0.try_into()?;
         renderer
             .render(&mut scaler, glyph_id)
             .with_context(|| format!("unable to render glyph via swash for {params:?}"))
@@ -1297,6 +1315,17 @@ impl CosmicTextSystemState {
             FallbackFontClass::Proportional
         }
     }
+}
+
+fn alpha_bitmap<'a>(
+    font: swash::FontRef<'a>,
+    glyph_id: u16,
+    pixels_per_em: u16,
+) -> Option<ttf_parser::RasterGlyphImage<'a>> {
+    let locations = font.table(swash::tag_from_bytes(b"EBLC"))?;
+    let data = font.table(swash::tag_from_bytes(b"EBDT"))?;
+    let locations = ttf_parser::cblc::Table::parse(locations)?;
+    ttf_parser::cbdt::Table::parse(locations, data)?.get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
 }
 
 #[inline(always)]

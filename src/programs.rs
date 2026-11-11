@@ -85,35 +85,59 @@ pub fn startable() -> Vec<Value> {
 /// Which of `commands` this machine can start, asked of the shell agents start
 /// in (so an app opened from the Dock finds what the person's terminal finds).
 /// On another machine (`on`): its login/interactive shell, as remote agents start.
-pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
+pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, String> {
     if commands.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     // Each found one as a marked line: an interactive shell may print its own
     // things (a prompt's escapes, a greeting) around the answer.
-    let out = match on {
+    let result = match on {
         Some(m) => {
             let argv = crate::remote_shell::check(commands);
-            crate::mods::run_on(m, &argv[0], &argv[1..]).unwrap_or_default()
+            let result = match crate::mods::run_remote(m, &argv[0], &argv[1..], None) {
+                Err(e) if e.contains("cannot start sh: program not found") => {
+                    crate::mods::run_remote(m, "powershell.exe", &installed_powershell(commands), None)
+                }
+                r => r,
+            };
+            result.map(|(code, out, err)| (code, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
         }
         None if cfg!(windows) => {
-            let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-            let script = format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}");
-            crate::mods::run_here(&crate::window::shell(), &["-NoLogo".into(), "-Command".into(), script]).unwrap_or_default()
+            // The core refreshes user/system PATH; the app may have inherited only the system PATH.
+            let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
+            args.extend(installed_powershell(commands));
+            crate::mods::run_blocking(&crate::core_bin::path().to_string_lossy(), &args, None, std::time::Duration::from_secs(30))
         }
         None => {
             let shell = crate::window::shell();
             let line = installed_line(commands, base(&shell) == "fish");
-            crate::mods::run_here(&shell, &["-ic".into(), line]).unwrap_or_default()
+            let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
+            crate::mods::run_blocking(&shell, &[mode.into(), line], None, std::time::Duration::from_secs(30))
         }
     };
+    installed_result(commands, result)
+}
+
+fn installed_result(commands: &[String], result: Result<(i32, String, String), String>) -> Result<Vec<String>, String> {
+    let (code, out, err) = result?;
+    if code != 0 || !out.lines().any(|line| line == "herdr-check-complete") {
+        return Err(format!("could not check installed agents (exit {code}): {}", err.trim()));
+    }
     let found: std::collections::HashSet<&str> = out.split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
-    commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect()
+    Ok(commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect())
+}
+
+fn installed_powershell(commands: &[String]) -> Vec<String> {
+    let list = commands.iter().map(|c| powershell_quote(c)).collect::<Vec<_>>().join(",");
+    let script = format!(
+        "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}; \"herdr-check-complete\""
+    );
+    vec!["-NoLogo".into(), "-Command".into(), script]
 }
 
 /// Check in the shell itself for functions, but not aliases (`"$@"` cannot run them).
 fn installed_line(commands: &[String], fish: bool) -> String {
-    commands
+    let checks = commands
         .iter()
         .map(|c| {
             let word = format!("'{}'", c.replace('\'', "'\\''"));
@@ -121,7 +145,8 @@ fn installed_line(commands: &[String], fish: bool) -> String {
             format!("{unalias}command -v {word} >/dev/null 2>&1 && printf 'herdr-has:%s\\n' {word};")
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    format!("{checks} printf '\\nherdr-check-complete\\n'")
 }
 
 thread_local! {
@@ -171,6 +196,12 @@ pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
 }
 
+/// How the app calls an agent ("Kiro finished"), from its 7501 `app`: the
+/// name `of` shows for it (the person's `programs.json` included), else the `app`.
+pub fn name(app: &str) -> String {
+    TABLE.with(|t| find(&t.borrow(), app).map(|(key, e)| e.name.clone().unwrap_or_else(|| key.to_owned()))).unwrap_or_else(|| app.to_owned())
+}
+
 /// An agent's 7501 `app` as a name Herdr ships (`claude` for `claude-code`),
 /// else `other` (`unknown` when it gave none): never the person's own words.
 pub fn agent_name(app: Option<&str>) -> String {
@@ -207,17 +238,18 @@ const PS_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B
 
 /// `& 'prog' 'arg 1'`: a command for PowerShell's `-Command`, each word quoted.
 pub fn powershell_line(cmd: &[String]) -> String {
-    let quote = |w: &String| {
-        let mut s = String::from("'");
-        for ch in w.chars() {
-            if PS_QUOTES.contains(&ch) {
-                s.push(ch);
-            }
+    format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
+}
+
+fn powershell_quote(word: &str) -> String {
+    let mut s = String::from("'");
+    for ch in word.chars() {
+        if PS_QUOTES.contains(&ch) {
             s.push(ch);
         }
-        s + "'"
-    };
-    format!("& {}", cmd.iter().map(quote).collect::<Vec<_>>().join(" "))
+        s.push(ch);
+    }
+    s + "'"
 }
 
 /// The words back from `powershell_line`.
@@ -348,9 +380,27 @@ mod tests {
     }
 
     #[test]
+    fn powershell_checks_keep_command_names_literal() {
+        let argv = installed_powershell(&["claude".into(), "missing'command; $x".into(), "O’Brien".into()]);
+        assert_eq!(argv[..2], ["-NoLogo", "-Command"]);
+        assert!(argv[2].contains("@('claude','missing''command; $x','O’’Brien')"));
+        assert!(argv[2].contains("[Console]::OutputEncoding"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_finds_installed_commands() {
+        let commands = ["cmd.exe".into(), "herdr_missing_agent_440".into()];
+        let result = crate::mods::run_blocking("powershell.exe", &installed_powershell(&commands), None, std::time::Duration::from_secs(30));
+        assert_eq!(installed_result(&commands, result).unwrap(), ["cmd.exe"]);
+    }
+
+    #[test]
     fn agents_shells_tools_and_what_interpreters_run() {
         assert_eq!(key(Some("claude-code"), &["/bin/zsh"]), "claude");
         assert_eq!(key(Some("grok-build"), &["/bin/zsh"]), "grok");
+        assert_eq!(key(Some("dsh-tui"), &["/bin/zsh"]), "dsh-tui");
+        assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");
@@ -378,7 +428,18 @@ mod tests {
             .args(["-c", &format!("issue57_function() {{ :; }}; alias issue57_alias='printf alias'; {line}")])
             .output()
             .unwrap();
-        assert_eq!(String::from_utf8(out.stdout).unwrap(), "herdr-has:issue57_function\nherdr-has:printf\n");
+        assert!(out.status.success());
+        assert_eq!(installed_result(&commands, Ok((0, String::from_utf8(out.stdout).unwrap(), String::new()))).unwrap(), ["issue57_function", "printf"]);
+    }
+
+    #[test]
+    fn installed_check_failures_are_not_missing_agents() {
+        let commands = ["claude".into()];
+        assert_eq!(installed_result(&commands, Ok((0, "\nherdr-check-complete\n".into(), String::new()))).unwrap(), Vec::<String>::new());
+        assert!(installed_result(&commands, Err("machine offline".into())).unwrap_err().contains("machine offline"));
+        for (code, output) in [(1, "herdr-check-complete\n"), (0, ""), (0, "herdr-has:claude\n")] {
+            assert!(installed_result(&commands, Ok((code, output.into(), "shell failed".into()))).is_err());
+        }
     }
 
     #[test]

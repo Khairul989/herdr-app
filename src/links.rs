@@ -79,6 +79,10 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
     if scheme {
+        // Windows can't open a file URL whose path is percent-encoded, the way programs write them.
+        if let Some(path) = file_url_path(link).filter(|p| p.exists()) {
+            return Some(Target::File(path));
+        }
         return Some(Target::Url(link.to_owned()));
     }
     let home = std::env::home_dir();
@@ -111,19 +115,76 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
-/// Hands the target to the system (xdg-open, open on macOS, explorer on Windows).
+/// The path a `file:` URL names on this computer, percent-decoded.
+fn file_url_path(link: &str) -> Option<PathBuf> {
+    let rest = link.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    // Another host's file, or no path.
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let rest = rest.split(['?', '#']).next()?;
+    let mut bytes = Vec::with_capacity(rest.len());
+    let mut i = 0;
+    while i < rest.len() {
+        if rest.as_bytes()[i] == b'%' {
+            bytes.push(u8::from_str_radix(rest.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(rest.as_bytes()[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    // `/C:/Users/...` names `C:\Users\...`.
+    if cfg!(windows) && path.as_bytes().get(2) == Some(&b':') && path.as_bytes()[1].is_ascii_alphabetic() {
+        return Some(PathBuf::from(path[1..].replace('/', "\\")));
+    }
+    Some(PathBuf::from(path))
+}
+
+/// Hands the target to the system's default handler.
 pub fn open(target: &Target) {
     let arg = match target {
         Target::Url(u) => std::ffi::OsStr::new(u),
         Target::File(p) => p.as_os_str(),
     };
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer.exe"
-    } else {
-        "xdg-open"
+    open_system(arg);
+}
+
+#[cfg(windows)]
+fn open_system(arg: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
+        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     };
+
+    let mut wide: Vec<u16> = arg.encode_wide().collect();
+    if wide.contains(&0) {
+        tracing::warn!("cannot open a link containing a NUL");
+        return;
+    }
+    wide.push(0);
+    // ShellExecuteW can pump messages; never reenter GPUI while it handles a click.
+    std::thread::spawn(move || {
+        let initialized = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };
+        // Explorer interprets '=' as its own arguments; the handler gets a literal target.
+        let result = unsafe {
+            ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        } as isize;
+        if result <= 32 {
+            tracing::warn!("cannot open link: ShellExecuteW returned {result}");
+        }
+        if initialized >= 0 {
+            unsafe { CoUninitialize() };
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn open_system(arg: &std::ffi::OsStr) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let spawned = std::process::Command::new(opener)
         .arg(arg)
         .stdin(std::process::Stdio::null())
@@ -245,6 +306,21 @@ mod tests {
     }
 
     #[test]
+    fn query_links_keep_their_full_target() {
+        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D", "file:///C:/Windows/System32/winver.exe"] {
+            let text = format!("Dashboard: {url}");
+            let range = find(&text, text.find(url).unwrap()).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            // winver.exe exists on Windows, where it opens as the file.
+            let expected = match url.strip_prefix("file:///") {
+                Some(path) if cfg!(windows) => Target::File(path.replace('/', "\\").into()),
+                _ => Target::Url(url.into()),
+            };
+            assert_eq!(resolve(&text[range], None), Some(expected));
+        }
+    }
+
+    #[test]
     fn finds_the_link_under_the_pointer() {
         let text = "see https://a.com and /tmp/x.txt.";
         assert_eq!(find(text, 0), None);
@@ -327,6 +403,29 @@ mod tests {
             let dotted = dir.join("src/main.rs.");
             std::fs::write(&dotted, "").unwrap();
             assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_urls_open_as_the_file_they_name() {
+        let dir = std::env::temp_dir().join(format!("herdr-file-urls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("测试 #1.txt");
+        std::fs::write(&path, "").unwrap();
+        // As programs write them: every byte outside the unreserved set encoded.
+        let slashed = path.to_str().unwrap().replace('\\', "/");
+        let encoded: String = slashed
+            .bytes()
+            .map(|b| if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+            .collect();
+        let root = if cfg!(windows) { "/" } else { "" };
+        let file = Some(Target::File(path.clone()));
+        assert_eq!(resolve(&format!("file://{root}{encoded}"), None), file);
+        assert_eq!(resolve(&format!("file://localhost{root}{encoded}"), None), file);
+        assert_eq!(resolve(&format!("file://{root}{}", slashed.replace('#', "%23")), None), file);
+        for url in [format!("file://{root}{encoded}.gone"), format!("file://{root}{encoded}%ZZ"), format!("file://box{root}{encoded}")] {
+            assert_eq!(resolve(&url, None), Some(Target::Url(url.clone())), "{url}");
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

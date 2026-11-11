@@ -253,6 +253,22 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         }
     }
 
+    fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
+        let state = self.state.read();
+        let face = &state.fonts[font_id.0].font_face;
+        unsafe {
+            let mut data = std::ptr::null_mut();
+            let mut len = 0;
+            let mut context = std::ptr::null_mut();
+            let mut exists = Default::default();
+            face.TryGetFontTable(u32::from_le_bytes(tag), &mut data, &mut len, &mut context, &mut exists).ok()?;
+            if !exists.as_bool() { return None; }
+            let table = std::slice::from_raw_parts(data.cast::<u8>(), len as usize).to_vec();
+            face.ReleaseFontTable(context);
+            Some(table)
+        }
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         self.state.read().font_metrics(font_id)
     }
@@ -790,7 +806,7 @@ impl DirectWriteState {
                 .GetGlyphIndices(&raw const codepoints, 1, &raw mut glyph_indices)
                 .log_err()
         }
-        .map(|_| GlyphId(glyph_indices as u32))
+        .and_then(|_| (glyph_indices != 0).then_some(GlyphId(glyph_indices as u32)))
     }
 
     fn rasterize_glyph(
@@ -1976,6 +1992,21 @@ mod tests {
         D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
     };
     use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    #[test]
+    fn missing_characters_have_no_glyph() -> Result<()> {
+        let text_system = DirectWriteTextSystem::new(None)?;
+        let font_id = text_system.font_id(&Font {
+            family: "Consolas".into(),
+            ..Default::default()
+        })?;
+
+        assert!(text_system.glyph_for_char(font_id, 'M').is_some());
+        for ch in ['\u{f115}', '\u{f090}', '\u{f08b}', '\u{10ffff}'] {
+            assert_eq!(text_system.glyph_for_char(font_id, ch), None);
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_cluster_map() {
