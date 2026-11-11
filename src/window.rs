@@ -5890,7 +5890,7 @@ mod tests {
         }
         let (view, cx) = open_window(cx, "probe", "import { View, div } from \"gpui-kit\";\nexport default class P extends View { render() { return div(); } }", json!({ "id": "probe", "type": "block", "content": { "mod": "probe" } }));
         cx.run_until_parked();
-        let roots: Vec<_> = view.update(cx, |this, _| this.copies.values().filter_map(|c| c.root.clone()).collect());
+        let roots: Vec<_> = view.update(cx, |this, _| this.copies.values().filter_map(|c| c.view.as_ref().map(|view| view.root.clone())).collect());
         assert!(!roots.is_empty(), "no mod loaded");
         let running = |cx: &mut gpui::VisualTestContext| roots.iter().filter(|r| r.read_with(cx, |r, _| r.toast_clock_running())).count();
         assert_eq!(running(cx), 0, "no toasts, no clock");
