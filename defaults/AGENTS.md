@@ -849,6 +849,115 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
 
+### Devices
+
+Devices is a global toolbar panel beside Files, Changes and Notes. It belongs to Herdr,
+not an agent, tab or workspace. Connect a selected simulator, emulator or phone there;
+an app ID is optional for manual device connection. Switching workspaces or hiding the
+panel retains its connection and native stream. Disconnect explicitly to switch devices.
+
+```sh
+node ~/.config/herdr-app/mods/devices/agent.mjs show
+node ~/.config/herdr-app/mods/devices/agent.mjs devices
+node ~/.config/herdr-app/mods/devices/agent.mjs open --device EXACT_ID --app APP_ID
+node ~/.config/herdr-app/mods/devices/agent.mjs status
+node ~/.config/herdr-app/mods/devices/agent.mjs run current snapshot -i
+node ~/.config/herdr-app/mods/devices/agent.mjs run current key enter --snapshot --compact
+node ~/.config/herdr-app/mods/devices/agent.mjs close current
+```
+
+`open` selects the shared Devices panel, connects it, and returns its session. Any agent
+can reuse that session or `current`; input stays serialized with the same session lock.
+Coordinate manual/agent input and explicit disconnection. A different active device/app
+is never silently replaced. `open --device EXACT_ID` can connect without an app ID.
+`status` with no session reads the shared connection; `status SESSION` reads a specific one.
+For compatibility, explicit `--pane PANE_ID` still opens a legacy sibling device pane.
+The default layout contains `panel-body > devices` with `{mod:"devices",props:{global:true}}`;
+custom layouts need this child and their toolbar's Devices button.
+`HERDR_APP_HOME` selects the app home; `HERDR_APP_BIN` names an explicit executable.
+Use an absolute Node path when it is absent from PATH. Replies are JSON except --help
+and compact snapshots. Global connection requests/status live under `device-global/`;
+per-session evidence/control files remain under `device-panels/SESSION`.
+
+`run` accepts inspection/input commands and binds the target and session. The native right-side
+viewer streams continuously, including while the agent is idle. Click, drag, scroll or type
+directly in the live screen; the agent operates the same device. Coordinate input ownership.
+The helper refuses target overrides and concurrent helper commands on the same session.
+`status SESSION` reads the agent connection; it does not certify that video has decoded.
+Each successful agent action also saves a PNG as evidence. Check expected UI state to prove assertions.
+`agent.mjs --help` lists commands and flags. `key enter|return|backspace|delete|tab`
+sends actual simulator HID keys or Android keyevents; `press Enter`, `press Backspace`
+and `press Tab` are aliases. For physical iPhones use `keyboard enter` and the keyboard's
+own semantic keys instead; arbitrary hardware-key injection is not supported there.
+Append `--snapshot` to an action to return a fresh interactive frame in `data.snapshot`.
+An action that succeeded but could not capture fresh refs reports `data.snapshotError`;
+do not repeat the action blindly. Hardware key input always advances the backend ref frame.
+`snapshot -i --compact` prints plain text, one `@ref type label [visibility]` per line,
+with label whitespace flattened; omit `--compact` for the existing JSON shape. Combine
+`--snapshot --compact` on actions for `data.snapshotText` and `data.snapshotRefsGeneration`
+instead of a full tree. `find TEXT` is a read-only lookup (`get attrs`); only an explicit
+action such as `find TEXT click` taps. Selectors are quoted key=value expressions,
+e.g. `is visible 'label="Share Code Link"'`, `get attrs 'id="login"'`,
+or `wait 'label="Loaded"' 3000`. Snapshot refs also work as selectors.
+`alert` identifies activity/share sheets separately and refuses alert accept/dismiss
+on them; its message is never inferred from the app text behind an identified share sheet.
+Snapshot nodes include `visible`, `offscreen`, `visibleRect`, `visibleFraction` and
+`visibility` (`visible`, `partial`, `offscreen`, `hidden`, `unknown`), based on accessibility
+and viewport/scroll-ancestor clipping. Explicit zero-area clipped rectangles are offscreen.
+Fractions use original bounds or a unique node's previously observed full bounds in the
+same session/app/viewport; pre-clipped first observations can have an unknown fraction.
+`partial` means less than 50% is visible. Full-viewport generic containers with inherited
+labels are flagged as uncertain geometry instead of treated as visible buttons.
+This distinguishes offscreen carousel items; it does not prove unobstructed pixels or
+hittability. Verify a swipe's expected target/state instead of treating success as movement.
+The helper applies a checked patch to the pinned backend to recognize UIKit keyboard
+surface ownership, including tip controls outside the Keyboard node, while keeping the
+guard against tapping app controls behind the keyboard. Existing daemons load this patch
+on their next start; do not restart a daemon that owns another agent's active session.
+`keyboard dismiss` uses only the keyboard's own dismiss control; no Settings, app-switching
+or background-tap fallback is used. Its result includes `data.dismissCheck` with app state
+before/after and `foregroundChanged`; inspect that flag instead of inferring from a breadcrumb.
+Native video is outside `herdr-app shot`'s GPU capture; inspect the device with the helper's
+snapshots, screenshots and returned evidence paths.
+Switching away from the tab hides the native view while retaining its browser and stream;
+returning does not reload it. **Reconnect** explicitly replaces that stream.
+Closing the pane stops its owned stream server and leaves the device session
+running; use `close SESSION` or **Close app / release** to release it. Closed sessions
+are not automatically reopened when a panel reloads.
+An established session keeps its exact target through a temporary discovery gap; capture and
+input commands still report an unreachable device.
+
+Build and install Flutter apps separately with `flutter run -d <device-id>`. The helper uses
+local simulators, emulators and connected phones; remote device hosts are not supported here.
+The pane's **Controls** section provides manual device/app selection, refs or coordinates,
+scrolling, Back and typing. Setup stays collapsed while the live screen takes priority.
+For manual use, split a pane with `pane.split {direction: "right", mod: "devices", props?}`.
+
+**Install tools** installs pinned `agent-device` 0.21.36 and `expo-device-hub` 0.23.1 under the app home's `device-tools/`,
+using npm (Node >=22.12 required). No global install. iOS needs Xcode; Android needs the SDK.
+Opening a simulator also installs the pinned live viewer when missing. Native embedding currently
+requires macOS; iOS simulators and Android emulators are supported. **Reconnect** restarts only
+the pane's stream. `DeviceView.new(id, {node, script, toolsRoot, platform, device})` is the native
+leaf used by this mod; its server binds to loopback and exactly one selected device.
+Its optional `session` retains one stream across reconnect revisions; `active:false`
+releases that stream while keeping the mod pane open.
+For custom tool paths, pass tab props, e.g. `{"node":"/absolute/path/to/node","npm":"/absolute/path/to/npm"}`.
+Optional `cli` points at an existing matching-version `agent-device.mjs` and disables installation.
+An npm executable with a Node shebang also needs Node on its inherited PATH.
+
+Real iPhones need pairing/trust, Developer Mode, and a signed XCTest runner. Configure
+`AGENT_DEVICE_IOS_TEAM_ID` and, when needed, a unique `AGENT_DEVICE_IOS_BUNDLE_ID` in the app's
+environment. See <https://oss.callstack.com/agent-device/docs/installation#ios-physical-device-prerequisites>.
+Discovery does not prove that signing, captures, or input work on a physical phone.
+Physical iPhones use explicitly labelled captures and agent controls; live iPhone mirroring
+is not supported by this viewer.
+
+**Agent commands** shows helper instructions. Coordinate manual and agent input; do not
+operate a session concurrently. Agent panel connections and preview handoffs live in
+`device-panels/<session>/`; evidence PNGs live in `device-previews/<session>/`; device-tool
+state lives in `device-tools/state/`. The same panel restores its session on reload.
+No simulator is powered off by the mod.
+
 ### Check before you finish
 
 ```sh

@@ -112,6 +112,17 @@ those files or the generated guide. The app rewrites them on start.
   Discover required arguments with `herdr-app commands`.
 - Source editor mods can use `EditorState.focus()` and native search/replace
   methods from `gpui-kit.d.ts`; the mod draws the search controls.
+- For mobile testing, Devices is a global toolbar panel beside Files, Changes and Notes.
+  Use `node ~/.config/herdr-app/mods/devices/agent.mjs show`, then `open --device EXACT_ID --app APP_ID`.
+  It connects the shared panel, independent of the calling agent or workspace; `--app` is optional.
+  `status` reads its connection; `run current snapshot -i` and `run current click @e1` reuse it.
+  Coordinate input; `close current` disconnects it explicitly. A different active device/app
+  is never silently replaced. Explicit `--pane PANE_ID` retains legacy sibling-pane support.
+  Switching workspaces or hiding the panel retains its browser/stream; Reconnect replaces it.
+  Use `key enter|backspace|tab`, `snapshot -i --compact`, and `click @e1 --snapshot --compact`
+  for compact testing loops. `find TEXT` is read-only; `find TEXT click` is an explicit tap.
+  Native video is absent from `herdr-app shot`; use device snapshots/captures for assertions.
+  `agent.mjs --help` and the installed Devices guide cover selectors, Flutter and physical phones.
 - Virtual lists expose actual scroll position through `VirtualListScrollHandle.metrics()`;
   compare `offsetY` with `maxOffsetY` after `viewportHeight` becomes positive.
 - Save to reload. A broken save keeps the old version running and reports

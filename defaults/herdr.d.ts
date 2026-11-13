@@ -21,6 +21,14 @@ export function home(): string;
 /** The app's folder (`~/.config/herdr-app`, or `$HERDR_APP_HOME`): settings.json, keys.json, layouts/. */
 export function appHome(): string;
 
+/** Native live device viewer (macOS). Its owning mod retains the browser and stream
+ * across hidden tabs. Closing the mod or setting active:false stops its server.
+ * session identifies the same stream across explicit reconnect id/props changes.
+ * Use the Devices mod to manage installation and the agent-device connection. */
+export const DeviceView: {
+  new(id: string, props: { node: string; script: string; toolsRoot: string; platform: "ios" | "android"; device: string; session?: string; active?: boolean }): import("gpui-kit").NativeElement;
+};
+
 /** Reads UTF-8 text (up to 1 MiB), or null if absent. Runs off the UI thread.
  *  `on`: from that machine (a space's `machine`). */
 export function readTextFile(path: string, options?: { on?: string | null }): Promise<string | null>;
