@@ -527,7 +527,13 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                     "info" => None,
                     _ => return Err(Exception::throw_type(&ctx, "unknown editor search operation")),
                 };
-                if let Some(range) = selected { state.set_selected_range(range, cx); }
+                if let Some(range) = selected {
+                    state.set_selected_range(range, cx);
+                    // Applying a selection reveals its start. Restore the search
+                    // reveal afterward so the end of a long match stays visible.
+                    state.previous_search_match(cx);
+                    state.next_search_match(cx);
+                }
                 let session = state.search_session();
                 Ok(serde_json::json!({"query": session.query, "active": session.is_active(),
                     "count": session.matcher.len(), "current": session.matcher.current().map(|index| index + 1),
