@@ -1305,17 +1305,19 @@ impl AppWindow {
     }
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(copy) = self.copies.remove(slot)
-            && let Some(view) = copy.view
-        {
-            let metrics = view.metrics();
-            for (total, value) in self.retired_mod_metrics.iter_mut().zip(metrics) { *total = total.saturating_add(value); }
-            view.close(window, cx);
+        if let Some(copy) = self.copies.remove(slot) {
+            mods::device_view::release(copy.id);
+            if let Some(view) = copy.view {
+                let metrics = view.metrics();
+                for (total, value) in self.retired_mod_metrics.iter_mut().zip(metrics) { *total = total.saturating_add(value); }
+                view.close(window, cx);
+            }
         }
     }
 
     pub(crate) fn close_mods_now(&self, deadline: std::time::Instant, window: &mut Window, cx: &mut Context<Self>) {
         mods::final_cleanup(self.core.clone(), deadline, || {
+            for copy in self.copies.values() { mods::device_view::release(copy.id); }
             for view in self.copies.values().filter_map(|copy| copy.view.as_ref()) {
                 view.close_now(deadline, window, cx);
             }
@@ -4893,6 +4895,8 @@ impl Render for AppWindow {
         let _timed = crate::bench::timed(&crate::bench::WINDOW_US);
         crate::bench::frame_start();
         crate::terminal::next_frame();
+        let visible_copies = self.visible().1.iter().filter_map(|(slot, _)| self.copies.get(slot).map(|copy| copy.id)).collect();
+        mods::device_view::set_occluded(window, &visible_copies, !self.overlays.is_empty() || self.pane_drag.is_some());
         window.set_rem_size(px(settings::ui_font_size()));
         // A terminal the person clicked into becomes the focused pane.
         let clicked = self

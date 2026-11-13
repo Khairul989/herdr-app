@@ -22,6 +22,7 @@ mod render_tests;
 #[cfg(test)]
 mod lifecycle_tests;
 mod runtime;
+pub(crate) mod device_view;
 pub use runtime::ModRuntime;
 
 /// The frame's own mods (welcome, ...): the app's, not the person's. Written
@@ -909,6 +910,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
+        .component("DeviceView", move |args, window, cx| device_view::build(copy, args, window, cx))
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))

@@ -160,6 +160,16 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "devices",
+                      "type": "block",
+                      "content": {
+                        "mod": "devices",
+                        "props": {
+                          "global": true
+                        }
+                      }
                     }
                   ]
                 }

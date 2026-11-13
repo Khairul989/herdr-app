@@ -1,6 +1,6 @@
 //! Shipped JS descriptions and native rendering regressions.
 use super::*;
-use gpui::TestAppContext;
+use gpui::{IntoElement, TestAppContext};
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
 use std::{
     cell::Cell,
@@ -112,6 +112,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
+    module = module.component("DeviceView", |_, _, _| gpui::div().into_any_element());
     module = module.function("feedbackPreview", |a| {
         Ok(to_host(
             &json!({"available":true,"body":{"message":a.string(0)?,"email":a.string(1)?}}),
@@ -176,6 +177,10 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
+                }
+                // Device tools are optional: initial rendering must explain how to install them.
+                "exec" if first == "node" && a.get(1).map(from_host) == Some(json!(["/fixture/app/device-tools/node_modules/agent-device/bin/agent-device.mjs", "--version"])) => {
+                    Some(json!({"code":1,"stdout":"","stderr":"fixture: device tools are not installed"}))
                 }
                 "exec"
                     if first == "git"
@@ -417,6 +422,21 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+#[gpui::test]
+fn devices_show_preview_first_and_keep_setup_behind_controls(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), None).unwrap();
+    for label in ["Devices", "Controls", "Reconnect", "Close app / release"] {
+        assert!(tree.contains(label), "missing {label}: {tree}");
+    }
+    assert!(!tree.contains("Find devices"), "setup should start collapsed: {tree}");
+    let controls = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.showControls = true;")).unwrap();
+    for label in ["Install tools", "Find devices", "Open app", "Read UI"] {
+        assert!(controls.contains(label), "missing manual control {label}: {controls}");
+    }
 }
 
 /// A mod's localStorage write lands on the executor; one that lands after the
