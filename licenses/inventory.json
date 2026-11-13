@@ -191,6 +191,13 @@
       "files": [
         "LICENSE"
       ]
+    },
+    {
+      "name": "two-face embedded syntax definitions",
+      "source": "https://codeberg.org/CosmicHarper/two-face/src/tag/v0.5.2+bat-0.26.1/generated/acknowledgements_full.md",
+      "files": [
+        "licenses/two-face-syntaxes.txt"
+      ]
     }
   ]
 }
