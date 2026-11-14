@@ -6595,6 +6595,17 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    // HERDR: restore a position read with `anchor()`; see typings.
+    scroll_to_item_offset: (index, offset) => {
+      if (!Number.isInteger(index) || index < 0) {
+        throw new TypeError("scroll_to_item_offset(index, offset) needs a whole, non-negative index");
+      }
+      if (!Number.isFinite(offset) || offset < 0) {
+        throw new TypeError("scroll_to_item_offset(index, offset) needs a finite, non-negative offset");
+      }
+      __virtual_scroll_to_item_offset(handle, index, offset);
+    },
+    anchor: () => JSON.parse(__virtual_scroll_anchor(handle)),
     metrics: () => JSON.parse(__virtual_scroll_metrics(handle)),
     release: () => __virtual_scroll_release(handle),
   });

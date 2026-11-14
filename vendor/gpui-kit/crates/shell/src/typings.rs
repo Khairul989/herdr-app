@@ -3037,6 +3037,21 @@ const BASE: &str = r#"  /** A row. */
      */
     scroll_to_item(index: number, strategy?: "top" | "center"): void;
     scroll_to_bottom(): void;
+    /**
+     * Places the viewport top `offset` logical px below the top of item `index`,
+     * before the next frame, so a position read with `anchor()` can be restored
+     * after rows are prepended. The last of this, `scroll_to_item` and
+     * `scroll_to_bottom` requested in a frame wins; the result is clamped to the
+     * scroll range, and an index past the end is ignored. Feature-detect with
+     * `typeof handle.scroll_to_item_offset === "function"`.
+     */
+    scroll_to_item_offset(index: number, offset: number): void;
+    /**
+     * The first item whose bottom is below the viewport top, and how many logical
+     * px the viewport top sits below that item's top (>= 0), from the last layout.
+     * `null` before layout or with no items. Read-only; legal from render.
+     */
+    anchor(): { index: number; offset: number } | null;
     /** Actual laid-out scroll position, in logical pixels. Offsets increase downward.
      * viewportHeight is zero until the list has been laid out. Read-only; legal from render. */
     metrics(): { offsetY: number; maxOffsetY: number; viewportHeight: number };

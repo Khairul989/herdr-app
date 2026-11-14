@@ -46,7 +46,9 @@ https://gpui-kit.com. The Herdr app carries its own copy with additions
 `gpui-kit.d.ts` for elements and `herdr.d.ts` for the app's data and
 commands. They're rewritten on every start to match this version.
 For virtual lists, `VirtualListScrollHandle.metrics()` reports the actual scroll
-offset, limit and viewport height, so controls can detect reaching the bottom.
+offset, limit and viewport height, so controls can detect reaching the bottom;
+`anchor()` and `scroll_to_item_offset(index, offset)` read and restore a position as
+{row index, px into that row}, for example after rows are prepended.
 
 ## Changing things safely
 

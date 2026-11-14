@@ -11084,3 +11084,155 @@ fn a_list_reports_which_item_was_clicked(cx: &mut TestAppContext) {
     // covers 60..80.
     assert_a_click_reports_the_row_key(cx, measured_list_source(), 70.);
 }
+
+// HERDR: item-anchored scroll through the script API. Rows have mixed heights
+// (20 35 12 40 25 50 18 60 = 260px) in a 60px list, so item 3 starts at 67px
+// and the scroll range is 0..200.
+fn anchored_list_source(heights: &str, call: &str) -> String {
+    format!(
+        r#"
+import {{ div, View }} from "gpui-kit";
+import {{ v_flex, v_virtual_list, Button, VirtualListScrollHandle }} from "gpui-base";
+
+export default class Anchored extends View {{
+  init() {{
+    this.heights = {heights};
+    this.scroll = VirtualListScrollHandle.new();
+    this.initAnchor = this.scroll.anchor();
+  }}
+
+  prepend() {{ this.heights = [30, 14, 22, ...this.heights]; }}
+
+  render(cx) {{
+    const a = this.scroll.anchor();
+    const m = this.scroll.metrics();
+    return v_flex()
+      .w(300)
+      .h(200)
+      .child(Button.new("act").h(20).on_click((_event, cx) => {{ {call} cx.notify(); }}).child("act"))
+      .child(
+        v_virtual_list("rows", this.heights.length, this.heights, (index) => String(index), (range) => {{
+          const items = [];
+          for (let index = range.start; index < range.end; index++) {{
+            items.push(div().h(this.heights[index]).child(`row ${{index}}`));
+          }}
+          return items;
+        }}).h(60).track_scroll(this.scroll),
+      )
+      .child(`anchor=${{a ? a.index + "/" + a.offset : "null"}} off=${{m.offsetY}} max=${{m.maxOffsetY}} init=${{this.initAnchor}}`);
+  }}
+}}
+"#
+    )
+}
+
+const ANCHOR_ROWS: &str = "[20, 35, 12, 40, 25, 50, 18, 60]";
+
+fn field<'a>(tree: &'a str, name: &str) -> &'a str {
+    tree.split(&format!("{name}="))
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|value| value.trim_matches('"'))
+        .unwrap_or_else(|| panic!("no {name} in: {tree}"))
+}
+
+fn read_anchor(tree: &str) -> Option<(usize, f32)> {
+    let value = field(tree, "anchor");
+    let (index, offset) = value.split_once('/')?;
+    Some((index.parse().unwrap(), offset.parse().unwrap()))
+}
+
+fn read_offset(tree: &str) -> f32 {
+    field(tree, "off").parse().unwrap()
+}
+
+/// Mounts the anchored list scrolled 84px down (item 3, 17px in), runs the
+/// click script, and returns what the next render read back.
+fn run_anchored(cx: &mut TestAppContext, call: &str) -> (String, String) {
+    let (_runtime, _window, view, mut context) =
+        mount_list_source(cx, &anchored_list_source(ANCHOR_ROWS, call));
+    context.simulate_event(gpui::ScrollWheelEvent {
+        position: point(px(150.), px(50.)),
+        delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-84.))),
+        ..Default::default()
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let before = redraw_and_read(&mut context, &view);
+    context.simulate_click(point(px(20.), px(10.)), Modifiers::default());
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    (before, redraw_and_read(&mut context, &view))
+}
+
+#[gpui::test]
+fn scroll_to_item_offset_restores_the_row_anchor_after_a_prepend(cx: &mut TestAppContext) {
+    let (before, after) = run_anchored(
+        cx,
+        "const a = this.scroll.anchor(); this.prepend(); this.scroll.scroll_to_item_offset(a.index + 3, a.offset);",
+    );
+    assert_eq!(read_anchor(&before), Some((3, 17.)), "{before}");
+    let (index, offset) = read_anchor(&after).expect("an anchor");
+    assert_eq!(index, 6, "{after}");
+    assert!((offset - 17.).abs() < 0.5, "{after}");
+}
+
+#[gpui::test]
+fn scroll_to_item_top_does_not_restore_the_row_anchor(cx: &mut TestAppContext) {
+    // Control: the defect the offset call fixes is observable in this setup.
+    let (_, after) = run_anchored(
+        cx,
+        "const a = this.scroll.anchor(); this.prepend(); this.scroll.scroll_to_item(a.index + 3, \"top\");",
+    );
+    let (index, offset) = read_anchor(&after).expect("an anchor");
+    assert!(index != 6 || (offset - 17.).abs() > 0.5, "{after}");
+}
+
+#[gpui::test]
+fn scroll_to_item_offset_is_clamped_to_the_scroll_range(cx: &mut TestAppContext) {
+    let (_, after) = run_anchored(cx, "this.scroll.scroll_to_item_offset(7, 500);");
+    assert_eq!(read_offset(&after), 200., "{after}");
+    assert_eq!(field(&after, "max"), "200", "{after}");
+}
+
+#[gpui::test]
+fn scroll_to_item_offset_ignores_an_out_of_range_index(cx: &mut TestAppContext) {
+    let (_, after) = run_anchored(cx, "this.scroll.scroll_to_item_offset(99, 5);");
+    assert_eq!(read_offset(&after), 84., "{after}");
+}
+
+#[gpui::test]
+fn the_last_scroll_request_wins_between_offset_and_bottom(cx: &mut TestAppContext) {
+    let (_, bottom_last) = run_anchored(
+        cx,
+        "this.scroll.scroll_to_item_offset(1, 5); this.scroll.scroll_to_bottom();",
+    );
+    assert_eq!(read_offset(&bottom_last), 200., "{bottom_last}");
+    let (_, offset_last) = run_anchored(
+        cx,
+        "this.scroll.scroll_to_bottom(); this.scroll.scroll_to_item_offset(1, 5);",
+    );
+    assert_eq!(read_offset(&offset_last), 25., "{offset_last}");
+}
+
+#[gpui::test]
+fn anchor_is_null_before_layout_and_without_items(cx: &mut TestAppContext) {
+    let (before, _) = run_anchored(cx, "");
+    // The handle was read in `init`, before any layout existed.
+    assert_eq!(field(&before, "init"), "null", "{before}");
+    assert!(read_anchor(&before).is_some(), "{before}");
+
+    let (_runtime, _window, view, mut context) =
+        mount_list_source(cx, &anchored_list_source("[]", ""));
+    let empty = redraw_and_read(&mut context, &view);
+    assert_eq!(read_anchor(&empty), None, "{empty}");
+}
+
+#[gpui::test]
+fn scroll_to_item_offset_rejects_a_bad_index_or_offset(cx: &mut TestAppContext) {
+    // A throw inside the handler leaves the click's request unmade.
+    let (_, after) = run_anchored(
+        cx,
+        "try { this.scroll.scroll_to_item_offset(-1, 5); } catch (e) { return; }",
+    );
+    assert_eq!(read_offset(&after), 84., "{after}");
+}

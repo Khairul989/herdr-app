@@ -1301,6 +1301,34 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    // HERDR: item-anchored scroll; both ends of it are recorded or read, never
+    // performed here, for the reason `__virtual_scroll_to_item` gives.
+    let scroll_to_item_offset = runtime.clone();
+    globals.set(
+        "__virtual_scroll_to_item_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, index: usize, offset: f64| -> JsResult<()> {
+            live_virtual_scroll(&ctx, &scroll_to_item_offset, handle)?
+                .scroll_to_item_offset(index, gpui::px(offset as f32));
+            Ok(())
+        }),
+    )?;
+
+    let scroll_anchor = runtime.clone();
+    globals.set(
+        "__virtual_scroll_anchor",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<String> {
+            let scroll = live_virtual_scroll(&ctx, &scroll_anchor, handle)?;
+            Ok(match scroll.anchor() {
+                Some((index, offset)) => serde_json::json!({
+                    "index": index,
+                    "offset": f32::from(offset),
+                })
+                .to_string(),
+                None => "null".to_string(),
+            })
+        }),
+    )?;
+
     let scroll_metrics = runtime.clone();
     globals.set("__virtual_scroll_metrics", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<String> {
         let scroll = live_virtual_scroll(&ctx, &scroll_metrics, handle)?;
