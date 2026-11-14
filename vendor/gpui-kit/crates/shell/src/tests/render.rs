@@ -424,6 +424,58 @@ export default class Table extends View {
     }
 }
 
+// HERDR: `selected_text()` is "" with no selection from an event handler, and refuses render.
+// A drag (or select_all) selects nothing under this harness even though the same
+// calls select in gpui-base's own tests, so the non-empty path is proven there
+// (`selectable_text`), not here.
+#[gpui::test]
+fn selected_text_is_empty_without_a_selection_and_refuses_render(cx: &mut TestAppContext) {
+    use gpui::{point, px};
+
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { TextView, selected_text } from "gpui-base";
+export default class Quote extends View {
+  render() {
+    let render_error = "none";
+    try { selected_text(); } catch (e) { render_error = String(e.message).split(";")[0]; }
+    return div().on_mouse_move((_event, cx) => {
+      this.got = typeof selected_text() + ":[" + selected_text() + "]";
+      cx.notify();
+    }).child("render:" + render_error + " got:" + this.got)
+      .child(TextView.markdown("t", "alpha beta").selectable());
+  }
+}
+"#;
+    cx.update(crate::init);
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let view_type = runtime.load_source("quote.js", source).expect("load");
+    let runtime_for_view = runtime.clone();
+    let script_view = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let slot = script_view.clone();
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        *slot.borrow_mut() = Some(view.clone());
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    let view = script_view.borrow().clone().expect("view");
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.run_until_parked();
+    context.simulate_mouse_move(point(px(300.), px(8.)), None, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let tree = context.update(|_, cx| view.read(cx).snapshot().expect("snapshot").debug_tree());
+    assert!(
+        tree.contains("render:selected_text() cannot run during render or layout"),
+        "{tree}"
+    );
+    assert!(tree.contains("got:string:[]"), "{tree}");
+}
+
 #[gpui::test]
 fn a_script_view_produces_an_element_description(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));

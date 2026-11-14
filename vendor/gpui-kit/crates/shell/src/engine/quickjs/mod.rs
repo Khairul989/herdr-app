@@ -1208,6 +1208,8 @@ pub(crate) mod exports {
         // Theme (`theme_api`). The theme belongs to `gpui-base`, even though
         // mutation is legal only while a host call supplies the current App.
         "set_theme",
+        // HERDR: the text selected across TextViews.
+        "selected_text",
     ];
 
     /// The performance overlay, owned by `gpui-fps`: the element form, and
@@ -7941,6 +7943,7 @@ impl ShellRuntime {
             host::install(ctx, &module)?;
             host_modules::install(ctx)?;
             theme_api::install(ctx, &module)?;
+            window_api::install_selected_text(&module)?;
             entity_api::install(ctx, &module, runtime.clone())?;
             dock_api::install(ctx, &module, runtime.clone())?;
             scheduler::install(ctx, &module)?;

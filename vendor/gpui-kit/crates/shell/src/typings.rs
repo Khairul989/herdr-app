@@ -2425,6 +2425,8 @@ const BASE: &str = r#"  /** A row. */
     html(id: string, html: string): TextViewElement;
     markdown(id: string, markdown: string): TextViewElement;
   };
+  /** HERDR: the text currently selected in this window's TextViews, as Cmd+C would copy it; "" when none. Live calls only (event handlers, timers), not render. */
+  export function selected_text(): string;
   /**
    * A tab list. It holds no selection of its own — each `Tab` is told whether
    * it is selected, and reports activation through `on_click`, so the script
