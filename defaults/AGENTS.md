@@ -1067,7 +1067,7 @@ the same limits, previews and removal as picked images.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them. Text: `TextView.markdown(id, text)` renders markdown (`.on_table_action((action, table, cx) => …)` adds Copy Markdown / Copy CSV below tables and reports `"markdown"|"csv"` with `{headers, rows, markdown}`; the mod writes the clipboard); `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens

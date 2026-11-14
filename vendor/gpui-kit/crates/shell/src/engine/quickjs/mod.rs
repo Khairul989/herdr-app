@@ -4515,10 +4515,10 @@ impl ShellRuntime {
         scheduler::drain_runtime_jobs(self, window, cx);
     }
 
-    pub(crate) fn dispatch_host_event(
+    pub(crate) fn dispatch_host_event_args(
         self: &Rc<Self>,
         id: CallbackId,
-        payload: HostValue,
+        payloads: Vec<HostValue>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -4551,11 +4551,12 @@ impl ShellRuntime {
         );
         let result = self.with_js(|ctx| {
             let handler = entry.value.clone().restore(ctx)?;
-            let payload = host_modules::into_js(ctx, payload)?;
-            handler.call::<_, ()>((
-                payload,
-                context_object(ctx, ContextBinding::Call(generation))?,
-            ))
+            let mut args = JsArgs::new(ctx.clone(), payloads.len() + 1);
+            for payload in payloads {
+                args.push_arg(host_modules::into_js(ctx, payload)?)?;
+            }
+            args.push_arg(context_object(ctx, ContextBinding::Call(generation))?)?;
+            handler.call_arg::<()>(args)
         });
         if let Err(error) = result {
             tracing::error!("error in host component handler: {error}");
@@ -7258,6 +7259,7 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_table_action",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -8250,6 +8252,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_table_action"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -10250,6 +10253,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_table_action" => "on_table_action",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",

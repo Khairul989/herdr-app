@@ -360,6 +360,71 @@ export default class RichText extends View {{
 }
 
 #[gpui::test]
+fn text_view_accepts_on_table_action(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { TextView } from "gpui-base";
+export default class Table extends View {
+  render() {
+    return TextView.markdown("t", "| A |\n|---|\n| 1 |").on_table_action((_action, _table, _cx) => {});
+  }
+}
+"#;
+    let view_type = runtime.load_source("table.js", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("render");
+    assert!(tree.contains(":on_table_action(fn)"), "{tree}");
+}
+
+#[gpui::test]
+fn text_view_table_action_buttons_report_action_and_table(cx: &mut TestAppContext) {
+    use gpui::MouseButton;
+
+    let source = r#"
+import { View } from "gpui-kit";
+import { TextView } from "gpui-base";
+export default class Table extends View {
+  render() {
+    if (this.got) return "got:" + this.got;
+    return TextView.markdown("t", "| Name | Age |\n|:--|--:|\n| Alice | 30 |")
+      .on_table_action((action, table, cx) => {
+        this.got = [action, table.headers.join(","), table.rows.map(r => r.join(",")).join(";"), table.markdown.includes("Alice"), "span" in table].join("|");
+        cx.notify();
+      });
+  }
+}
+"#;
+    for (selector, action) in [
+        ("table-action-markdown", "markdown"),
+        ("table-action-csv", "csv"),
+    ] {
+        let mut app = cx.new_app();
+        let (view, mut context) = mount_text_view_link(&mut app, source);
+        let bounds = context
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} should be painted"));
+        context.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(bounds.center(), MouseButton::Left, Modifiers::default());
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        let tree =
+            context.update(|_, cx| view.read(cx).snapshot().expect("snapshot").debug_tree());
+        let expected = format!("got:{action}|Name,Age|Alice,30|true|false");
+        assert!(tree.contains(&expected), "{action}: {tree}");
+        app.quit();
+    }
+}
+
+#[gpui::test]
 fn a_script_view_produces_an_element_description(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));
 

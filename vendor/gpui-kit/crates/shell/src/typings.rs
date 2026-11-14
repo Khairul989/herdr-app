@@ -2416,6 +2416,8 @@ const BASE: &str = r#"  /** A row. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /** Shows Copy Markdown / Copy CSV below each Markdown table and reports clicks. */
+    on_table_action(handler: (action: "markdown" | "csv", table: { headers: string[]; rows: string[][]; markdown: string }, cx: Context) => void): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -4714,6 +4716,7 @@ mod tests {
             .expect("end of Element declaration")
             .0;
         assert!(!element.contains("on_link_click("));
+        assert!(!element.contains("on_table_action("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
