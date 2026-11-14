@@ -168,3 +168,48 @@ fn inline_virtual_font_and_rem_zoom_remeasure_offscreen_blocks(cx: &mut TestAppC
         "zoomed={zoomed:?}, rem_zoomed={rem_zoomed:?}"
     );
 }
+
+// HERDR: a mod reads a markdown TextView selection from a container mouse-up.
+struct MarkdownMouseUpRoot {
+    view: Entity<TextViewState>,
+    seen: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+}
+
+impl Render for MarkdownMouseUpRoot {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        use gpui::InteractiveElement as _;
+        let seen = self.seen.clone();
+        div().w(px(400.)).h(px(200.)).child(crate::TextSelectionLayer).child(
+            div()
+                .size_full()
+                .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                    seen.borrow_mut().push(crate::TextSelection::selected_text(window, cx));
+                })
+                .child(TextView::new(&self.view)),
+        )
+    }
+}
+
+#[gpui::test]
+fn a_container_mouse_up_reads_a_markdown_text_view_selection(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let handler_seen = seen.clone();
+    let (root, cx) = cx.add_window_view(move |_, cx| MarkdownMouseUpRoot {
+        view: cx.new(|cx| TextViewState::markdown("Alpha **bold** Élan 😀\n\nSecond line", cx)),
+        seen: handler_seen,
+    });
+    settle(cx);
+    let bounds = root.read_with(cx, |root, cx| root.view.read(cx).selection_adapter.text_bounds());
+    let (first, last) = (bounds.first().unwrap(), bounds.last().unwrap());
+    let start = point(first.left() + px(0.1), first.top() + first.size.height / 2.);
+    let end = point(last.right() - px(0.1), last.top() + last.size.height / 2.);
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+    settle(cx);
+    cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
+    settle(cx);
+    cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+    settle(cx);
+    let got = seen.borrow().last().cloned().unwrap_or_default();
+    assert!(got.contains("Alpha bold Élan 😀") && got.contains("Second line"), "got {got:?}");
+}
