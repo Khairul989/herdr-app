@@ -2416,6 +2416,8 @@ const BASE: &str = r#"  /** A row. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /** Shows Copy Markdown / Copy CSV below each Markdown table and reports clicks. */
+    on_table_action(handler: (action: "markdown" | "csv", table: { headers: string[]; rows: string[][]; markdown: string }, cx: Context) => void): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -3178,6 +3180,8 @@ const BASE: &str = r#"  /** A row. */
     next_search_match(): EditorSearchInfo;
     previous_search_match(): EditorSearchInfo;
     close_search(): void;
+    /** HERDR: "always" keeps the scrollbars painted; null follows the theme's mode. */
+    set_scrollbar(mode: "always" | "hover" | "scrolling" | null): void;
     /** Replace the current match or every match as an undoable edit. Readonly editors return zero. */
     replace_search(text: string, all?: boolean): number;
     value(): string;
@@ -3202,6 +3206,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** HERDR: "always" keeps the scrollbars painted; "hover" / "scrolling" follow those modes. Defaults to the theme's mode. */
+      scrollbar?: "always" | "hover" | "scrolling";
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
@@ -4714,6 +4720,7 @@ mod tests {
             .expect("end of Element declaration")
             .0;
         assert!(!element.contains("on_link_click("));
+        assert!(!element.contains("on_table_action("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));

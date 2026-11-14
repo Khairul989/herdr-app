@@ -1067,12 +1067,15 @@ the same limits, previews and removal as picked images.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them. Text: `TextView.markdown(id, text)` renders markdown (`.on_table_action((action, table, cx) => …)` adds Copy Markdown / Copy CSV below tables and reports `"markdown"|"csv"` with `{headers, rows, markdown}`; the mod writes the clipboard); `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. A viewer opens
+or editor with syntax highlighting, line numbers and folding
+(`scrollbar: "always"` keeps its scrollbars painted; `state.set_scrollbar(mode|null)` changes it later). A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
+Code viewers include TypeScript (`ts`/`typescript`), TSX, JSX (using the
+TypeScriptReact grammar), and Dart; unknown languages stay plain text.
 
 Editors expose `focus()` for file switching and native literal search:
 `set_search_query(text, case_sensitive?)`, `search_info()`,

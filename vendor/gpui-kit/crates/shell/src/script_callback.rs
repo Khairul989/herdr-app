@@ -51,6 +51,11 @@ impl ScriptCallbackRoute {
     }
 
     pub(crate) fn emit(&self, payload: HostValue, window: &mut Window, cx: &mut App) {
+        self.emit_args(vec![payload], window, cx);
+    }
+
+    /// Delivers several values to the handler, before its context.
+    pub(crate) fn emit_args(&self, payloads: Vec<HostValue>, window: &mut Window, cx: &mut App) {
         let target = ROUTES.with_borrow(|routes| {
             routes
                 .get(&self.0.0)
@@ -60,7 +65,7 @@ impl ScriptCallbackRoute {
             return;
         };
         if let Some(runtime) = runtime.upgrade() {
-            runtime.dispatch_host_event(callback, payload, window, cx);
+            runtime.dispatch_host_event_args(callback, payloads, window, cx);
         }
     }
 }

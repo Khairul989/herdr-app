@@ -527,13 +527,30 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                     "info" => None,
                     _ => return Err(Exception::throw_type(&ctx, "unknown editor search operation")),
                 };
-                if let Some(range) = selected { state.set_selected_range(range, cx); }
+                if let Some(range) = selected {
+                    state.set_selected_range(range, cx);
+                    // Applying a selection reveals its start. Restore the search
+                    // reveal afterward so the end of a long match stays visible.
+                    state.previous_search_match(cx);
+                    state.next_search_match(cx);
+                }
                 let session = state.search_session();
                 Ok(serde_json::json!({"query": session.query, "active": session.is_active(),
                     "count": session.matcher.len(), "current": session.matcher.current().map(|index| index + 1),
                     "case_sensitive": !session.case_insensitive}).to_string())
             })
         }).ok_or_else(|| needs_call(&ctx, "EditorState search"))?
+    }))?;
+
+    // HERDR: scrollbar mode arrives as JSON so it is validated like the constructor option.
+    let scrollbar_editor = runtime.clone();
+    globals.set("__editor_set_scrollbar", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, json: String| -> JsResult<()> {
+        refuse_mutation_in_render(&ctx, "EditorState.set_scrollbar()")?;
+        let mode: Option<crate::entities::EditorScrollbar> = serde_json::from_str(&json)
+            .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
+        let editor = live_editor(&ctx, &scrollbar_editor, handle)?;
+        scope::with_current_app(|cx| editor.update(cx, |state, cx| state.set_scrollbar_mode(mode.map(Into::into), cx)))
+            .ok_or_else(|| needs_call(&ctx, "EditorState.set_scrollbar()"))
     }))?;
 
     let replace_editor = runtime.clone();

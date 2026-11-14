@@ -876,6 +876,11 @@ impl Scrollbar {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn mode_override(&self) -> Option<ScrollbarMode> {
+        self.mode
+    }
+
     /// Set a special scroll size of the content area, default is None.
     ///
     /// Default will sync the `content_size` from `scroll_handle`.
