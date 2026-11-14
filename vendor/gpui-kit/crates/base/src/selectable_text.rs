@@ -365,6 +365,45 @@ mod tests {
         );
     }
 
+    // HERDR: a container's mouse-up after a drag on its text can read the finished selection.
+    struct SelectionMouseUpView {
+        seen: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Render for SelectionMouseUpView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui::InteractiveElement as _;
+            let seen = self.seen.clone();
+            div().size_full().child(TextSelectionLayer).child(
+                div()
+                    .w(px(240.))
+                    .h(px(32.))
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        seen.borrow_mut().push(TextSelection::selected_text(window, cx));
+                    })
+                    .child(SelectableText::new("local", "alpha beta")),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_container_mouse_up_after_a_drag_reads_the_selected_text(cx: &mut TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let handler_seen = seen.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| SelectionMouseUpView { seen: handler_seen });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(point(px(1.), px(12.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(px(220.), px(12.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(point(px(220.), px(12.)), MouseButton::Left, Modifiers::default());
+        assert_eq!(seen.borrow().last().map(String::as_str), Some("alpha beta"));
+    }
+
     #[test]
     fn wrapped_selection_paints_full_width_middle_lines() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(100.)));
