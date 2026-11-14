@@ -9,7 +9,11 @@ use std::{
 
 use gpui::{App, Window};
 
-use crate::{HostValue, engine::ShellRuntime, spec::CallbackId};
+use crate::{
+    ComponentDataValue, HostValue,
+    engine::ShellRuntime,
+    spec::CallbackId,
+};
 
 #[derive(Clone)]
 pub(crate) struct ScriptCallbackRoute(Arc<RouteId>);
@@ -52,6 +56,46 @@ impl ScriptCallbackRoute {
 
     pub(crate) fn emit(&self, payload: HostValue, window: &mut Window, cx: &mut App) {
         self.emit_args(vec![payload], window, cx);
+    }
+
+    // HERDR: asks the handler to present one inline math node. Layout-phase, read-only.
+    // A throw or a malformed result is logged and falls back to the readable source.
+    pub(crate) fn inline_math(
+        &self,
+        node: (&str, &str),
+        font_size: f32,
+        line_height: f32,
+        foreground: String,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<(gpui::AnyElement, f32)> {
+        let (runtime, callback) = ROUTES.with_borrow(|routes| {
+            routes
+                .get(&self.0.0)
+                .map(|target| (target.runtime.clone(), target.callback))
+        })?;
+        let runtime = runtime.upgrade()?;
+        let object = |fields: Vec<(&str, ComponentDataValue)>| {
+            ComponentDataValue::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
+        };
+        let arguments = [
+            object(vec![
+                ("tex", ComponentDataValue::String(node.0.into())),
+                ("source", ComponentDataValue::String(node.1.into())),
+            ]),
+            object(vec![
+                ("font_size", ComponentDataValue::Number(font_size.into())),
+                ("line_height", ComponentDataValue::Number(line_height.into())),
+                ("foreground", ComponentDataValue::String(foreground)),
+            ]),
+        ];
+        match runtime.dispatch_inline_math(callback, &arguments, window, cx) {
+            Ok(presented) => presented,
+            Err(error) => {
+                tracing::warn!("inline math renderer failed: {error:#}");
+                None
+            }
+        }
     }
 
     /// Delivers several values to the handler, before its context.

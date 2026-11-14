@@ -1102,6 +1102,8 @@ mod lifecycle;
 mod standard;
 mod template;
 mod theme_api;
+// HERDR: the hex format `theme()` gives mods, for inline math's `foreground`.
+pub(crate) use theme_api::hex as theme_hex;
 mod window_api;
 
 /// The names each built-in module exports.
@@ -4904,6 +4906,68 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Option<gpui::AnyElement>> {
+        Ok(self
+            .dispatch_inline_element_with(
+                id,
+                arguments,
+                interactive,
+                |ctx, value| {
+                    if value.is_null() || value.is_undefined() {
+                        Ok(None)
+                    } else {
+                        element_id(ctx, &value).map(|root| Some((root, ())))
+                    }
+                },
+                window,
+                cx,
+            )?
+            .map(|(element, ())| element))
+    }
+
+    /// HERDR: presents one inline math node. A null or malformed result (no
+    /// element, a missing or non-finite baseline) is `None`, the readable-source
+    /// fallback; a throw is an `Err`.
+    pub(crate) fn dispatch_inline_math(
+        self: &Rc<Self>,
+        id: CallbackId,
+        arguments: &[ComponentDataValue],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Option<(gpui::AnyElement, f32)>> {
+        self.dispatch_inline_element_with(
+            id,
+            arguments,
+            false,
+            |ctx, value| {
+                let Some(object) = value.as_object() else {
+                    return Ok(None);
+                };
+                let element: Value = object.get("element")?;
+                let baseline: Value = object.get("baseline")?;
+                let Some(baseline) = baseline.as_number().filter(|n| n.is_finite()) else {
+                    return Ok(None);
+                };
+                if element.is_null() || element.is_undefined() {
+                    return Ok(None);
+                }
+                element_id(ctx, &element).map(|root| Some((root, baseline as f32)))
+            },
+            window,
+            cx,
+        )
+    }
+
+    /// HERDR: the callback's value is read by `extract` while the script is still
+    /// running, so a handler may return an element plus data (an inline baseline).
+    pub(crate) fn dispatch_inline_element_with<T>(
+        self: &Rc<Self>,
+        id: CallbackId,
+        arguments: &[ComponentDataValue],
+        interactive: bool,
+        extract: impl for<'js> FnOnce(&Ctx<'js>, Value<'js>) -> JsResult<Option<(SpecId, T)>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Option<(gpui::AnyElement, T)>> {
         let entry = self
             .callbacks
             .borrow()
@@ -4968,15 +5032,11 @@ impl ShellRuntime {
                 }
                 args.push_arg(context_object(ctx, ContextBinding::Call(generation))?)?;
                 let value: Value = handler.call_arg(args)?;
-                if value.is_null() || value.is_undefined() {
-                    Ok(None)
-                } else {
-                    element_id(ctx, &value).map(Some)
-                }
+                extract(ctx, value)
             });
             let arena = temporary.finish();
             match described {
-                Ok(Some(root)) => {
+                Ok(Some((root, extra))) => {
                     if let Some(generation) = callback_generation {
                         self.callbacks.borrow_mut().commit();
                         callbacks.active = false;
@@ -4997,17 +5057,18 @@ impl ShellRuntime {
                         )?;
                         use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
                         // The frame's event table holds the lease until the next frame replaces it.
-                        Ok(Some(
+                        Ok(Some((
                             gpui::div()
                                 .child(element)
                                 .on_mouse_move(move |_, _, _| {
                                     let _ = &snapshot;
                                 })
                                 .into_any_element(),
-                        ))
+                            extra,
+                        )))
                     } else {
                         crate::materialize::try_materialize_subtree(self, &arena, root, window, cx)
-                            .map(Some)
+                            .map(|element| Some((element, extra)))
                     }
                 }
                 Ok(None) => Ok(None),
@@ -7274,6 +7335,7 @@ impl ShellRuntime {
                 "on_click",
                 "on_link_click",
                 "on_table_action",
+                "inline_math",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -8268,6 +8330,7 @@ impl ShellRuntime {
             "on_click"
             | "on_link_click"
             | "on_table_action"
+            | "inline_math"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8328,6 +8391,31 @@ impl ShellRuntime {
                     registered_in: scope::current_generation(),
                 });
                 let name = callback_op_name(method).expect("this arm's own list");
+                // HERDR: `inline_math(render, revision)` also records its revision.
+                if method == "inline_math" {
+                    let revision = match args.0.get(1) {
+                        None | Some(Argument::Value(Bridged::Nil)) => 0.0,
+                        Some(Argument::Value(Bridged::Number(number))) if number.is_finite() => {
+                            *number
+                        }
+                        _ => {
+                            return Err(Exception::throw_type(
+                                ctx,
+                                "inline_math(render, revision) expects a finite number second",
+                            ));
+                        }
+                    };
+                    self.push_op_checked(
+                        ctx,
+                        self.push_op(
+                            id,
+                            SpecOp::Method(
+                                "inline_math_revision",
+                                smallvec::smallvec![Bridged::Number(revision)],
+                            ),
+                        ),
+                    )?;
+                }
                 self.push_op_checked(ctx, self.push_op(id, SpecOp::Callback(name, callback)))
             }
             "disabled"
@@ -10269,6 +10357,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
         "on_table_action" => "on_table_action",
+        "inline_math" => "inline_math",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",

@@ -2418,6 +2418,15 @@ const BASE: &str = r#"  /** A row. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
     /** Shows Copy Markdown / Copy CSV below each Markdown table and reports clicks. */
     on_table_action(handler: (action: "markdown" | "csv", table: { headers: string[]; rows: string[][]; markdown: string }, cx: Context) => void): this;
+    /**
+     * Presents inline math the native parser recognised (`$x^2$`; currency such as
+     * `$5 and $10` stays text). `render` runs during layout and must only read caches:
+     * return `{ element, baseline }` (baseline = distance from the element's top to its
+     * alphabetic baseline, logical px) or null for the readable source. `source` keeps its
+     * delimiters and is what copy returns. Changing `revision` with the same text lays the
+     * formulas out again. Feature-detect with `"inline_math" in view`.
+     */
+    inline_math(render: (node: { tex: string; source: string }, context: { font_size: number; line_height: number; foreground: string }) => { element: Element; baseline: number } | null, revision: number): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -4742,6 +4751,7 @@ mod tests {
             .0;
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("on_table_action("));
+        assert!(!element.contains("inline_math("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));

@@ -127,6 +127,7 @@ pub(crate) mod quickjs;
 /// `load_app` into `instantiate` without spelling the type.
 #[cfg(test)]
 pub(crate) use quickjs::ViewType;
+pub(crate) use quickjs::theme_hex;
 #[cfg(feature = "quickjs")]
 pub use quickjs::{LoadedApplication, ShellRuntime, ViewObject};
 

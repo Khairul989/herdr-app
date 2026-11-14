@@ -318,6 +318,8 @@ struct Behavior {
     text_scrollable: Option<bool>,
     on_link_click: Option<CallbackId>,
     on_table_action: Option<CallbackId>,
+    // HERDR: inline math presentation.
+    inline_math: Option<CallbackId>,
 
     /// Whether a `NumberInput` stacks both step buttons to the right of the
     /// text, rather than putting one on each side of it.
@@ -1194,6 +1196,13 @@ fn materialize_component(
                         .child(button("copy-csv", "Copy CSV", "csv"))
                 })
             }
+            if let Some(callback) = behavior.inline_math {
+                let route = crate::script_callback::ScriptCallbackRoute::new(
+                    Rc::downgrade(runtime),
+                    callback,
+                );
+                view = view.plugin(text_view::InlineMathPlugin::new(route));
+            }
             Styled::style(&mut view).refine(&refinement);
             text_view::with_policy(view, spec.policy).into_any_element()
         }
@@ -1550,6 +1559,10 @@ fn materialize_component(
                 *path = crate::AppAssets::cache_key(path);
             }
             let mut image = gpui::img(source).id(element_id(id, behavior.key.clone()));
+            // HERDR: lets a test read where a keyed image, such as an inline formula, is painted.
+            if let Some(key) = behavior.key.clone() {
+                image = image.debug_selector(move || format!("image:{key}"));
+            }
             image.style().refine(&refinement);
             image.into_any_element()
         }
@@ -2767,6 +2780,7 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_click" => behavior.on_click = Some(*id),
                 "on_link_click" => behavior.on_link_click = Some(*id),
                 "on_table_action" => behavior.on_table_action = Some(*id),
+                "inline_math" => behavior.inline_math = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
@@ -3491,6 +3505,10 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
         "disabled" => behavior.disabled = flag.unwrap_or(true),
         "selectable" => behavior.selectable = Some(flag.unwrap_or(true)),
         "scrollable" => behavior.text_scrollable = Some(flag.unwrap_or(true)),
+        // HERDR: the revision is part of the description only. Every re-render of the
+        // view builds the TextView again and lays its inline objects out again, so a
+        // changed revision needs no native action beyond that.
+        "inline_math_revision" => {}
         "selected" => behavior.selected = flag.unwrap_or(true),
         "checked" => behavior.checked = flag.unwrap_or(true),
         "value" => behavior.value = args.first().and_then(|value| value.as_f32().ok()),

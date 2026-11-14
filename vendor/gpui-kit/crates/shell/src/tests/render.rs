@@ -11236,3 +11236,295 @@ fn scroll_to_item_offset_rejects_a_bad_index_or_offset(cx: &mut TestAppContext) 
     );
     assert_eq!(read_offset(&after), 84., "{after}");
 }
+
+// HERDR: `TextView.inline_math(render, revision)`.
+mod inline_math {
+    use super::*;
+    use gpui::{Bounds, MouseButton, Pixels, point, px};
+
+    const SVG: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="20"><rect width="30" height="20"/></svg>"#;
+
+    /// A view holding `TextView` text, driven through its real JS API. `view` is a JS
+    /// expression for the element. The callback log, selection and size surface in the
+    /// status line through a mouse-move; a right press marks the mod's cache ready and
+    /// bumps `this.rev`.
+    fn mount<'a>(
+        cx: &'a mut TestAppContext,
+        view: &str,
+    ) -> (gpui::Entity<ScriptView>, &'a mut VisualTestContext) {
+        let svg = std::env::temp_dir().join("herdr-inline-math-test.svg");
+        std::fs::write(&svg, SVG).expect("write svg");
+        let source = r##"
+import { View, div, image } from "gpui-kit";
+import { TextView, selected_text } from "gpui-base";
+globalThis.__calls = [];
+globalThis.__ready = false;
+const svg = __SVG__;
+const fx = (id, w, h) => image(svg).id(id).w(w).h(h);
+export default class Math extends View {
+  render() {
+    const rev = this.rev || 0;
+    const view = __VIEW__;
+    return div().w(400).h(300)
+      .on_mouse_move((_e, cx) => {
+        this.calls = globalThis.__calls.map(c => [c.tex, c.source, c.font_size, c.line_height, c.foreground].join("~")).join(";");
+        cx.notify();
+      })
+      .on_mouse_up("left", (_e, cx) => { this.sel = selected_text(); cx.notify(); })
+      .on_mouse_down("right", (_e, cx) => { globalThis.__ready = true; this.rev = (this.rev || 0) + 1; cx.notify(); })
+      .child(div().w(400)__WRAP__.on_size_change((s, cx) => { this.size = s.width + "x" + s.height; cx.notify(); }).child(view))
+      .child("|calls=" + (this.calls || "") + "|sel=" + (this.sel || "") + "|size=" + (this.size || "") + "|end");
+  }
+}
+"##
+        .replace("__SVG__", &serde_json::to_string(svg.to_str().unwrap()).unwrap())
+        .replace("__WRAP__", if view.contains("scrollable") { ".h(200)" } else { "" })
+        .replace("__VIEW__", view);
+        cx.update(crate::init);
+        let runtime = ShellRuntime::new_isolated().expect("runtime");
+        cx.update(|cx| runtime.set_global(cx));
+        let view_type = runtime.load_source("math.js", &source).expect("load");
+        let runtime_for_view = runtime.clone();
+        let slot = Rc::new(std::cell::RefCell::new(None));
+        let handle = slot.clone();
+        let (_root, context) = cx.add_window_view(move |window, cx| {
+            let object = runtime_for_view
+                .instantiate(&view_type, window, cx)
+                .expect("instantiate");
+            let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+            *handle.borrow_mut() = Some(view.clone());
+            crate::root::ShellRoot::new(view.into(), window, cx)
+        });
+        let view = slot.borrow().clone().expect("view");
+        settle(context);
+        (view, context)
+    }
+
+    fn settle(context: &mut VisualTestContext) {
+        for _ in 0..3 {
+            context.run_until_parked();
+            context.update(|window, cx| window.draw(cx).clear(cx));
+        }
+    }
+
+    /// Publishes the log through a mouse-move and returns the status line.
+    fn status(view: &gpui::Entity<ScriptView>, context: &mut VisualTestContext) -> String {
+        context.simulate_mouse_move(point(px(390.), px(290.)), None, Modifiers::default());
+        settle(context);
+        context.update(|_, cx| view.read(cx).snapshot().expect("snapshot").debug_tree())
+    }
+
+    fn field(tree: &str, name: &str) -> String {
+        let start = tree.find(&format!("|{name}=")).unwrap_or_else(|| panic!("{name} in {tree}"))
+            + name.len()
+            + 2;
+        let rest = &tree[start..];
+        // A selection ends with the paragraph's newline, written escaped in the tree.
+        rest[..rest.find('|').unwrap_or(rest.len())]
+            .trim_end_matches("\\n")
+            .to_string()
+    }
+
+    fn drag(context: &mut VisualTestContext) {
+        let (from, to) = (point(px(1.), px(8.)), point(px(399.), px(8.)));
+        context.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        settle(context);
+        context.simulate_mouse_move(to, MouseButton::Left, Modifiers::default());
+        settle(context);
+        context.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        settle(context);
+    }
+
+    fn bounds(context: &mut VisualTestContext, id: &str) -> Option<Bounds<Pixels>> {
+        context.debug_bounds(Box::leak(format!("image:{id}").into_boxed_str()))
+    }
+
+    fn measure<'a>(
+        cx: &'a mut TestAppContext,
+        view: &str,
+    ) -> (String, gpui::Entity<ScriptView>, &'a mut VisualTestContext) {
+        let (entity, context) = mount(cx, view);
+        drag(context);
+        let tree = status(&entity, context);
+        (tree, entity, context)
+    }
+
+    const PLAIN: &str = r#"TextView.markdown("t", "before $x$ and costs $5 and $10 after")"#;
+
+    #[gpui::test]
+    fn without_the_method_math_and_currency_stay_literal_and_nothing_is_called(
+        cx: &mut TestAppContext,
+    ) {
+        let (tree, _, _) = measure(cx, PLAIN);
+        assert_eq!(field(&tree, "sel"), "before $x$ and costs $5 and $10 after", "{tree}");
+        assert_eq!(field(&tree, "calls"), "", "{tree}");
+    }
+
+    const NULLS: &str = r#"TextView.markdown("t", "before $x$ and costs $5 and $10 after").inline_math((node, c) => { globalThis.__calls.push({ ...node, ...c }); return null; }, rev)"#;
+
+    #[gpui::test]
+    fn null_throw_and_bad_baselines_show_the_literal_source_at_the_same_layout(
+        cx: &mut TestAppContext,
+    ) {
+        let (plain, _, _) = measure(cx, PLAIN);
+        let literal = (field(&plain, "sel"), field(&plain, "size"));
+        assert_eq!(literal.0, "before $x$ and costs $5 and $10 after");
+        let cases = [
+            ("null", NULLS.to_string()),
+            ("throw", NULLS.replace("return null;", "throw new Error('boom');")),
+            ("nan", NULLS.replace("return null;", "return { element: fx('fx', 30, 20), baseline: NaN };")),
+            ("missing", NULLS.replace("return null;", "return { element: fx('fx', 30, 20) };")),
+            ("negative", NULLS.replace("return null;", "return { element: fx('fx', 30, 20), baseline: -5 };")),
+            ("beyond the element", NULLS.replace("return null;", "return { element: fx('fx', 30, 20), baseline: 999 };")),
+            ("no element", NULLS.replace("return null;", "return { baseline: 10 };")),
+        ];
+        for (name, view) in cases {
+            let (tree, _, context) = measure(cx, &view);
+            assert_eq!(field(&tree, "sel"), literal.0, "{name}: {tree}");
+            assert_eq!(field(&tree, "size"), literal.1, "{name}: {tree}");
+            assert!(bounds(context, "fx").is_none(), "{name}: a rejected formula must not paint");
+            assert!(field(&tree, "calls").starts_with("x~$x$~"), "{name}: the callback ran: {tree}");
+        }
+    }
+
+    #[gpui::test]
+    fn currency_never_reaches_the_callback(cx: &mut TestAppContext) {
+        let (tree, _, _) = measure(cx, NULLS);
+        // Layout runs several times, so the callback is called several times; but only ever
+        // for the formula, never for the currency.
+        let calls = field(&tree, "calls");
+        assert!(!calls.is_empty());
+        assert!(calls.split(';').all(|call| call.starts_with("x~$x$~")), "{calls}");
+    }
+
+    const FORMULAS: &str = r#"TextView.markdown("t", "A $x$ B $y$ C").inline_math((node, c) => {
+      globalThis.__calls.push({ ...node, ...c });
+      return node.tex === "x"
+        ? { element: fx("fx", 30, 20), baseline: 20 }
+        : { element: fx("fy", 24, 30), baseline: 24 };
+    }, rev)"#;
+
+    #[gpui::test]
+    fn formulas_sit_inline_on_the_text_baseline_by_their_returned_baseline(cx: &mut TestAppContext) {
+        let (tree, _, context) = measure(cx, FORMULAS);
+        let (x, y) = (
+            bounds(context, "fx").expect("fx painted"),
+            bounds(context, "fy").expect("fy painted"),
+        );
+        // fx's bottom is its baseline (20 of 20), so it rests on the text baseline. fy's
+        // baseline is 24 of 30: its top must sit 4px above fx's top for the same line.
+        let text_baseline = x.top() + px(20.);
+        assert!((y.top() + px(24.) - text_baseline).abs() < px(0.5), "fx {x:?} fy {y:?}");
+        assert!((x.top() - y.top()).abs() > px(3.5), "different baselines give different tops: {x:?} {y:?}");
+        assert!(y.left() >= x.right(), "same line, in order: {x:?} {y:?}");
+        assert_eq!((x.size.width, x.size.height), (px(30.), px(20.)));
+        assert_eq!((y.size.width, y.size.height), (px(24.), px(30.)));
+        let calls = field(&tree, "calls");
+        let parts: Vec<Vec<&str>> = calls.split(';').map(|c| c.split('~').collect()).collect();
+        assert_eq!((parts[0][0], parts[0][1]), ("x", "$x$"), "{calls}");
+        assert_eq!((parts[1][0], parts[1][1]), ("y", "$y$"), "{calls}");
+        assert!(parts.iter().all(|call| call[0] == "x" || call[0] == "y"), "{calls}");
+        let font: f32 = parts[0][2].parse().expect("font size");
+        let line: f32 = parts[0][3].parse().expect("line height");
+        assert!(font > 0. && line >= font, "{calls}");
+        assert!(parts[0][4].len() == 7 && parts[0][4].starts_with('#'), "{calls}");
+        // Same line: the taller formula must not push the paragraph into two blocks.
+        let height: f32 = field(&tree, "size").split('x').nth(1).unwrap().parse().unwrap();
+        assert!(height < line * 2. + 16., "one paragraph line, height {height}, line {line}");
+    }
+
+    #[gpui::test]
+    fn the_callback_sees_the_inherited_font_size(cx: &mut TestAppContext) {
+        let view = FORMULAS.replace(r#"TextView.markdown("t", "A $x$ B $y$ C")"#, r#"TextView.markdown("t", "A $x$ B $y$ C").text_size(23)"#);
+        let (tree, _, _) = measure(cx, &view);
+        let calls = field(&tree, "calls");
+        assert!(calls.starts_with("x~$x$~23~"), "{calls}");
+    }
+
+    #[gpui::test]
+    fn a_standalone_svg_image_is_hosted_inside_the_line(cx: &mut TestAppContext) {
+        let (_, _, context) = measure(cx, FORMULAS);
+        let x = bounds(context, "fx").expect("an image() element is laid out inline");
+        assert!(x.size.width == px(30.) && x.size.height == px(20.), "{x:?}");
+    }
+
+    // The second paragraph holds a formula that is always ready: where it sits shows
+    // whether the first paragraph was measured again.
+    const LATE: &str = r#"TextView.markdown("t", "before $x$ after\n\nsecond $y$ line").scrollable().inline_math((node, c) => {
+      globalThis.__calls.push({ ...node, ...c });
+      if (node.tex === "y") return { element: fx("fy", 20, 10), baseline: 10 };
+      return globalThis.__ready ? { element: fx("fx", 30, 60), baseline: 50 } : null;
+    }, REV)"#;
+
+    /// Returns where the second paragraph's formula sat before and after the cache turned
+    /// ready and a right press asked for a new layout.
+    fn second_paragraph_shift(cx: &mut TestAppContext, revision: &str) -> (f32, f32, bool, usize, usize) {
+        let (entity, context) = mount(cx, &LATE.replace("REV", revision));
+        let before = status(&entity, context);
+        let before_top = bounds(context, "fy").expect("fy painted").top();
+        assert!(bounds(context, "fx").is_none(), "{before}");
+        let calls_before = field(&before, "calls").matches(';').count();
+        context.simulate_mouse_down(point(px(200.), px(150.)), MouseButton::Right, Modifiers::default());
+        settle(context);
+        let after = status(&entity, context);
+        let after_top = bounds(context, "fy").expect("fy painted after").top();
+        (
+            f32::from(before_top),
+            f32::from(after_top),
+            bounds(context, "fx").is_some(),
+            calls_before,
+            field(&after, "calls").matches(';').count(),
+        )
+    }
+
+    #[gpui::test]
+    fn a_revision_bump_with_the_same_text_calls_again_and_lays_out_again(cx: &mut TestAppContext) {
+        let (before, after, painted, calls_before, calls_after) = second_paragraph_shift(cx, "rev");
+        assert!(painted, "the formula appears once the cache is ready");
+        assert!(calls_after > calls_before, "{calls_before} -> {calls_after}");
+        assert!(after - before > 25., "the first paragraph grew, so the second moved down: {before} -> {after}");
+    }
+
+    #[gpui::test]
+    fn the_method_exists_records_its_revision_and_rejects_a_bad_one(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::init(cx));
+        let runtime = ShellRuntime::new_isolated().expect("runtime");
+        cx.update(|cx| runtime.set_global(cx));
+        let window = cx.add_window(|_, _| Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let mut render = |name: &str, call: &str| {
+            let source = format!(
+                r#"
+import {{ View }} from "gpui-kit";
+import {{ TextView }} from "gpui-base";
+export default class M extends View {{
+  render() {{
+    const view = TextView.markdown("t", "$x$");
+    return ("inline_math" in view) && view{call};
+  }}
+}}
+"#
+            );
+            let view_type = runtime.load_source(name, &source).expect("load");
+            let object = context
+                .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+                .expect("instantiate");
+            context.update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        };
+        let tree = render("ok.js", ".inline_math(() => null, 7)").expect("render");
+        assert!(tree.contains(":inline_math(fn)"), "{tree}");
+        assert!(tree.contains("inline_math_revision"), "{tree}");
+        assert!(tree.contains("7"), "{tree}");
+        assert!(render("bad.js", ".inline_math(() => null, \"7\")").is_err());
+        assert!(render("nan.js", ".inline_math(() => null, NaN)").is_err());
+        assert!(render("nofn.js", ".inline_math(1, 7)").is_err());
+    }
+
+    #[gpui::test]
+    fn dragging_across_a_rendered_formula_copies_the_original_source(cx: &mut TestAppContext) {
+        let view = r#"TextView.markdown("t", "before $x^2$ after").inline_math((node, c) => ({ element: fx("fx", 30, 20), baseline: 20 }), rev)"#;
+        let (tree, _, context) = measure(cx, view);
+        assert!(bounds(context, "fx").is_some(), "the formula is rendered: {tree}");
+        assert_eq!(field(&tree, "sel"), "before $x^2$ after", "{tree}");
+    }
+}
