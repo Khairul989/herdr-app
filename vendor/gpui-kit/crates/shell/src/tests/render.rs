@@ -5747,6 +5747,44 @@ export default class Note extends View {
     draw(&mut context, &view);
 }
 
+// HERDR: mods read the caret back in the same UTF-16 units `set_selected_range` takes.
+#[gpui::test]
+fn a_textarea_reports_its_selected_range_in_utf16(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { Input, InputState, Textarea, TextareaState } from "gpui-base";
+export default class Caret extends View {
+  init() {
+    this.body = TextareaState.new({ value: "é😀 @do" });
+    this.body.set_selected_range({ start: 5, end: 5 });
+    const caret = this.body.selected_range();
+    this.body.set_selected_range({ start: 1, end: 4 });
+    const span = this.body.selected_range();
+    this.line = InputState.new({ value: "ab😀" });
+    this.line.set_selected_range({ start: 4, end: 4 });
+    const end = this.line.selected_range();
+    this.report = [caret.start, caret.end, span.start, span.end, end.start, end.end].join(",");
+  }
+  render() {
+    return div().child(Textarea.new(this.body)).child(Input.new(this.line)).child("caret:" + this.report);
+  }
+}
+"#;
+    let view_type = runtime.load_source("caret", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("render");
+    assert!(tree.contains("caret:5,5,1,4,4,4"), "{tree}");
+}
+
 // HERDR: exercise editor exports, retained value/events, and materialization beside an input.
 #[gpui::test]
 fn an_editor_holds_highlighted_code_beside_an_input(cx: &mut TestAppContext) {
