@@ -5806,6 +5806,117 @@ export default class Code extends View {
     assert!(tree.contains("changes=1"), "{tree}");
 }
 
+// HERDR: scrollbar mode is an option and a setter; unset follows the theme.
+#[gpui::test]
+fn a_script_editor_accepts_a_scrollbar_mode(cx: &mut TestAppContext) {
+    use gpui_base::ScrollbarMode;
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() {
+    this.code = EditorState.new({language: "rust", value: "fn main() {}", scrollbar: "always"});
+  }
+  render(cx) { return Editor.new(this.code).h(240); }
+}
+"#;
+    let view_type = runtime.load_source("scrollbar-code", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("scrollbar: \"always\" must be accepted");
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|_, cx| {
+        assert_eq!(editor.read(cx).scrollbar_mode(), Some(ScrollbarMode::Always));
+    });
+    let view = context.update(|_, cx| cx.new(|_| ScriptView::new(runtime, object)));
+    draw(&mut context, &view);
+}
+
+#[gpui::test]
+fn a_script_editor_without_a_scrollbar_option_follows_the_theme(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() { this.code = EditorState.new({language: "rust", value: "x"}); }
+  render(cx) { return Editor.new(this.code).h(240); }
+}
+"#;
+    let view_type = runtime.load_source("default-scrollbar", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|_, cx| assert_eq!(editor.read(cx).scrollbar_mode(), None));
+}
+
+#[gpui::test]
+fn a_script_editor_rejects_an_unknown_scrollbar_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() { this.code = EditorState.new({scrollbar: "sometimes"}); }
+  render(cx) { return Editor.new(this.code).h(240); }
+}
+"#;
+    let view_type = runtime.load_source("bad-scrollbar", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let error = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .err()
+        .expect("an unknown scrollbar mode must fail");
+    let message = format!("{error:?}");
+    assert!(message.contains("sometimes") && message.contains("unknown variant"), "{message}");
+    assert!(runtime.entities().first_editor().is_none(), "no state may be retained");
+}
+
+#[gpui::test]
+fn set_scrollbar_changes_and_clears_an_open_editors_mode(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() {
+    this.code = EditorState.new({language: "rust", value: "x", scrollbar: "always"});
+    this.code.set_scrollbar(null);
+    this.err = "none";
+    try { this.code.set_scrollbar("loud"); } catch (e) { this.err = String(e); }
+  }
+  render(cx) { return Editor.new(this.code).h(240).child("err=" + this.err); }
+}
+"#;
+    let view_type = runtime.load_source("set-scrollbar", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("set_scrollbar must be callable");
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|_, cx| assert_eq!(editor.read(cx).scrollbar_mode(), None));
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("render");
+    assert!(tree.contains("unknown variant") && tree.contains("loud"), "{tree}");
+}
+
 // HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.
 #[gpui::test]
 fn a_readonly_script_editor_remains_selectable(cx: &mut TestAppContext) {

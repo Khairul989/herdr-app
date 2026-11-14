@@ -542,6 +542,17 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }).ok_or_else(|| needs_call(&ctx, "EditorState search"))?
     }))?;
 
+    // HERDR: scrollbar mode arrives as JSON so it is validated like the constructor option.
+    let scrollbar_editor = runtime.clone();
+    globals.set("__editor_set_scrollbar", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, json: String| -> JsResult<()> {
+        refuse_mutation_in_render(&ctx, "EditorState.set_scrollbar()")?;
+        let mode: Option<crate::entities::EditorScrollbar> = serde_json::from_str(&json)
+            .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
+        let editor = live_editor(&ctx, &scrollbar_editor, handle)?;
+        scope::with_current_app(|cx| editor.update(cx, |state, cx| state.set_scrollbar_mode(mode.map(Into::into), cx)))
+            .ok_or_else(|| needs_call(&ctx, "EditorState.set_scrollbar()"))
+    }))?;
+
     let replace_editor = runtime.clone();
     globals.set("__editor_replace_search", Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, replacement: String, all: bool| -> JsResult<usize> {
         refuse_mutation_in_render(&ctx, "EditorState.replace_search()")?;

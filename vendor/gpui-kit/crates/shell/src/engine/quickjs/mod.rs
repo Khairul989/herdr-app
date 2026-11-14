@@ -7117,6 +7117,7 @@ globalThis.__gpui = (() => {
           next_search_match: () => JSON.parse(__editor_search(handle, "next", "", false)),
           previous_search_match: () => JSON.parse(__editor_search(handle, "previous", "", false)),
           close_search: () => { __editor_search(handle, "close", "", false); },
+          set_scrollbar: (mode) => __editor_set_scrollbar(handle, JSON.stringify(mode ?? null)),
           replace_search: (text, all = false) => __editor_replace_search(handle, String(text), !!all),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),

@@ -492,6 +492,8 @@ pub struct InputBaseState<M: InputModeKind> {
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
+    // HERDR: explicit scrollbar mode; None follows the theme.
+    pub(super) scrollbar_mode: Option<crate::ScrollbarMode>,
     /// The unwrapped width of the longest line and what it was measured for.
     pub(super) longest_line_width: Cell<Option<(LongestLineKey, Pixels)>>,
     pub(super) editor_paddings: Edges<Pixels>,
@@ -857,6 +859,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             scroll_handle: ScrollHandle::new(),
             scroll_size: gpui::size(px(0.), px(0.)),
             editor_scrollbar_snapshot: Cell::new(None),
+            scrollbar_mode: None,
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
@@ -1210,6 +1213,18 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(crate) fn readonly(mut self, readonly: bool) -> Self {
         self.readonly = readonly;
         self
+    }
+
+    // HERDR: lets a mod keep scrollbars painted; None restores the theme's mode.
+    pub fn set_scrollbar_mode(&mut self, mode: Option<crate::ScrollbarMode>, cx: &mut Context<Self>) {
+        if self.scrollbar_mode != mode {
+            self.scrollbar_mode = mode;
+            cx.notify();
+        }
+    }
+
+    pub fn scrollbar_mode(&self) -> Option<crate::ScrollbarMode> {
+        self.scrollbar_mode
     }
 
     pub fn set_readonly(&mut self, readonly: bool, cx: &mut Context<Self>) {
@@ -6002,6 +6017,19 @@ mod tests {
                 state.right(&MoveRight, window, cx);
                 assert_eq!(state.cursor(), 2);
             })
+        });
+    }
+
+    #[gpui::test]
+    fn the_scrollbar_mode_defaults_to_the_theme_and_can_be_overridden(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let view = InputView::new(cx);
+        view.input.update(cx, |state, cx| {
+            assert_eq!(state.scrollbar_mode(), None);
+            state.set_scrollbar_mode(Some(crate::ScrollbarMode::Always), cx);
+            assert_eq!(state.scrollbar_mode(), Some(crate::ScrollbarMode::Always));
+            state.set_scrollbar_mode(None, cx);
+            assert_eq!(state.scrollbar_mode(), None);
         });
     }
 

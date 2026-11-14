@@ -3180,6 +3180,8 @@ const BASE: &str = r#"  /** A row. */
     next_search_match(): EditorSearchInfo;
     previous_search_match(): EditorSearchInfo;
     close_search(): void;
+    /** HERDR: "always" keeps the scrollbars painted; null follows the theme's mode. */
+    set_scrollbar(mode: "always" | "hover" | "scrolling" | null): void;
     /** Replace the current match or every match as an undoable edit. Readonly editors return zero. */
     replace_search(text: string, all?: boolean): number;
     value(): string;
@@ -3204,6 +3206,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** HERDR: "always" keeps the scrollbars painted; "hover" / "scrolling" follow those modes. Defaults to the theme's mode. */
+      scrollbar?: "always" | "hover" | "scrolling";
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */

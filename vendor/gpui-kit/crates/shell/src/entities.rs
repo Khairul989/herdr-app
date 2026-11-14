@@ -182,6 +182,25 @@ pub(crate) struct PlainScrollHandle {
     pub(crate) pending: Rc<Cell<Option<usize>>>,
 }
 
+// HERDR: scripts spell scrollbar modes in lowercase; unknown words fail decoding.
+#[derive(serde::Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum EditorScrollbar {
+    Always,
+    Hover,
+    Scrolling,
+}
+
+impl From<EditorScrollbar> for gpui_base::ScrollbarMode {
+    fn from(mode: EditorScrollbar) -> Self {
+        match mode {
+            EditorScrollbar::Always => Self::Always,
+            EditorScrollbar::Hover => Self::Hover,
+            EditorScrollbar::Scrolling => Self::Scrolling,
+        }
+    }
+}
+
 // HERDR: script editor construction options, decoded before retaining any state.
 #[derive(serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -192,6 +211,7 @@ pub(crate) struct EditorOptions {
     pub folding: bool,
     pub readonly: bool,
     pub soft_wrap: bool,
+    pub scrollbar: Option<EditorScrollbar>,
     pub syntax: HashMap<String, String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -206,6 +226,7 @@ impl Default for EditorOptions {
             folding: true,
             readonly: false,
             soft_wrap: false,
+            scrollbar: None,
             syntax: HashMap::new(),
             font_family: None,
             font_size: None,
@@ -474,6 +495,7 @@ impl EntityStore {
                 .folding(options.folding)
                 .soft_wrap(options.soft_wrap);
             state.set_readonly(options.readonly, cx);
+            state.set_scrollbar_mode(options.scrollbar.map(Into::into), cx);
             state.set_editor_style(style);
             state.set_highlighter_factory(
                 Rc::new(|language| {
