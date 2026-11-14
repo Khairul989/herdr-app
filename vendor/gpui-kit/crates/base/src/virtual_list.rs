@@ -718,6 +718,10 @@ impl Element for VirtualList {
             );
         }
 
+        // HERDR: release the handle state before items render: a script may
+        // read `anchor()` from the item callback.
+        drop(scroll_state);
+
         scroll_offset = scroll_offset
             .max(&point(
                 content_bounds.size.width - layout.size_layout.content_size.width,
@@ -1086,6 +1090,45 @@ mod tests {
         handle.scroll_to_item_offset(1, px(5.));
         draw(cx);
         assert_eq!(handle.offset().y, px(-25.));
+    }
+
+    // HERDR: a script reads `anchor()` from inside the item callback while the list lays out.
+    struct AnchorReadingHarness {
+        scroll_handle: VirtualListScrollHandle,
+        seen: Rc<RefCell<Vec<Option<(usize, Pixels)>>>>,
+    }
+
+    impl Render for AnchorReadingHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let handle = self.scroll_handle.clone();
+            let seen = self.seen.clone();
+            let sizes = Rc::new(MIXED.iter().map(|h| size(px(10.), px(*h))).collect::<Vec<_>>());
+            let item_sizes = sizes.clone();
+            virtual_list(cx.entity(), "anchor-reading", Axis::Vertical, sizes, move |_, range, _, _| {
+                seen.borrow_mut().push(handle.anchor());
+                range.map(|ix| div().w(item_sizes[ix].width).h(item_sizes[ix].height)).collect::<Vec<_>>()
+            })
+            .track_scroll(&self.scroll_handle)
+            .w(px(60.))
+            .h(px(60.))
+        }
+    }
+
+    #[gpui::test]
+    fn anchor_can_be_read_from_the_item_callback_during_layout(cx: &mut TestAppContext) {
+        let scroll_handle = VirtualListScrollHandle::new();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            let seen = seen.clone();
+            move |_, _| AnchorReadingHarness { scroll_handle, seen }
+        });
+        draw(cx);
+        scroll_handle.scroll_to_item_offset(3, px(17.));
+        draw(cx);
+        draw(cx);
+        assert!(seen.borrow().len() >= 2, "the item callback ran: {:?}", seen.borrow());
+        assert_eq!(scroll_handle.anchor().map(|(ix, _)| ix), Some(3));
     }
 
     #[gpui::test]
