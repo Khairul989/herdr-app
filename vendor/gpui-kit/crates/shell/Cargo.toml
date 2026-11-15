@@ -73,6 +73,7 @@ serde_json.workspace = true
 smallvec.workspace = true
 # HERDR: pure-Rust syntax engine (workspace uses regex-fancy, including Windows).
 syntect.workspace = true
+two-face = { version = "=0.5.2", default-features = false, features = ["syntect-fancy"] }
 smol.workspace = true
 # Only to find the files an SVG image references; GPUI's version, which renders it.
 usvg = { version = "0.46", default-features = false }

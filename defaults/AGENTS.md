@@ -1073,6 +1073,8 @@ keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly
 or editor with syntax highlighting, line numbers and folding. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
+Code viewers include TypeScript (`ts`/`typescript`), TSX, JSX (using the
+TypeScriptReact grammar), and Dart; unknown languages stay plain text.
 
 Editors expose `focus()` for file switching and native literal search:
 `set_search_query(text, case_sensitive?)`, `search_info()`,

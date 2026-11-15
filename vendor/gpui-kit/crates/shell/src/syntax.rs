@@ -12,7 +12,7 @@ use syntect::{
 
 /// Loading the default syntax definitions deserializes a few megabytes, so share
 /// one set across every highlighter instance.
-static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 
 /// A small, WASM-compatible example adapter for Base's parser-independent
 /// highlighting API. Syntect identifies scopes; the application-owned resolver
@@ -57,8 +57,9 @@ impl SyntectHighlighter {
 }
 
 fn find_syntax(language: &str) -> Option<&'static SyntaxReference> {
-    SYNTAX_SET
-        .find_syntax_by_token(language)
+    // The pure-Rust set shares TypeScriptReact's JSX parser for .jsx and .tsx.
+    let language = if language == "jsx" { "tsx" } else { language };
+    SYNTAX_SET.find_syntax_by_token(language)
         .or_else(|| SYNTAX_SET.find_syntax_by_extension(language))
 }
 
@@ -177,6 +178,7 @@ fn semantic_name(scope: Scope) -> Option<&'static str> {
     } else if scope.starts_with("entity.name.function") || scope.starts_with("support.function") {
         "function"
     } else if scope.starts_with("entity.name.type")
+        || scope.starts_with("entity.name.tag")
         || scope.starts_with("entity.name.class")
         || scope.starts_with("support.type")
     {
@@ -262,6 +264,51 @@ impl HighlightStyleResolver for SyntaxStyles {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extended_code_languages_produce_semantic_token_highlights() {
+        for (language, source, react) in [
+            ("ts", "interface User { name: string }\nconst user: User = { name: \"Élan\" };\n", false),
+            ("typescript", "const value: string = \"Élan\";\n", false),
+            ("tsx", "type Props = { title: string };\nconst Card = ({title}: Props) => <div title=\"Élan\">{title}</div>;\n", true),
+            ("jsx", "const Card = () => <div title=\"Élan\">Hello</div>;\n", true),
+            ("dart", "class User { final String name; User(this.name); }\nvoid main() { print(User('Élan').name); }\n", false),
+        ] {
+            let syntax = find_syntax(language).expect(language);
+            assert_ne!(syntax.name, "Plain Text");
+            let mut parser = ParseState::new(syntax);
+            let mut stack = ScopeStack::new();
+            let mut kinds = std::collections::HashSet::new();
+            let mut has_tag = false;
+            for line in LinesWithEndings::from(source) {
+                for (_, operation) in parser.parse_line(line, &SYNTAX_SET).expect("pure-Rust grammar must parse") {
+                    stack.apply(&operation).unwrap();
+                    for scope in &stack.scopes {
+                        if let Some(kind) = semantic_name(*scope) { kinds.insert(kind); }
+                        has_tag |= scope.build_string().contains("tag");
+                    }
+                }
+            }
+            assert!(kinds.contains("keyword"), "{language}: {kinds:?}");
+            assert!(kinds.contains("string"), "{language}: {kinds:?}");
+            if react { assert!(has_tag, "{language} must parse JSX tags"); }
+        }
+    }
+
+    #[test]
+    fn legacy_syntax_names_and_unknown_language_behavior_are_preserved() {
+        let legacy = SyntaxSet::load_defaults_newlines();
+        for syntax in legacy.syntaxes() {
+            if legacy.find_syntax_by_token(&syntax.name).is_some() {
+                assert!(find_syntax(&syntax.name).is_some(), "{}", syntax.name);
+            }
+        }
+        let syntax = find_syntax("JavaDoc").expect("legacy grammar name");
+        assert!(syntax.name.eq_ignore_ascii_case("JavaDoc"));
+        assert!(ParseState::new(syntax).parse_line("/** Documentation */\n", &SYNTAX_SET).is_ok());
+        assert!(find_syntax("unknown-language").is_none());
+        assert!(SyntectHighlighter::new("unknown-language").is_none());
+    }
 
     #[test]
     fn resolved_styles_cover_the_requested_range_without_gaps() {

@@ -111,7 +111,8 @@ those files or the generated guide. The app rewrites them on start.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
 - Source editor mods can use `EditorState.focus()` and native search/replace
-  methods from `gpui-kit.d.ts`; the mod draws the search controls.
+  methods from `gpui-kit.d.ts`; the mod draws the search controls. Native syntax
+  includes TypeScript, TSX, JSX (the TypeScriptReact grammar), and Dart.
 - For mobile testing, Devices is a global toolbar panel beside Files, Changes and Notes.
   Use `node ~/.config/herdr-app/mods/devices/agent.mjs show`, then `open --device EXACT_ID --app APP_ID`.
   It connects the shared panel, independent of the calling agent or workspace; `--app` is optional.
