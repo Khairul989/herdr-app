@@ -54,6 +54,7 @@ Agents that report status show as:
 
 Click an agent to see it. A worker without a pane opens in **peek**, over your tab. Keep it as a tab if you want it beside your other work.
 Ctrl-click a live terminal address in terminal text to peek at it; use Cmd-click on macOS.
+The same click opens URLs and file paths; Cmd-Shift-click previews a file in Quick Look on macOS.
 An address such as `t7` means a terminal on the same machine as the terminal showing it. `vps/t7` names one on another machine.
 
 The window arranges terminals. The core runs them.

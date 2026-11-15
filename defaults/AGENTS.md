@@ -170,6 +170,9 @@ the highlighted line shows where it will land.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
+  The same click opens a URL or an existing file path with the system's default app;
+  add Shift (Cmd-Shift-click) to preview a file in macOS Quick Look instead
+  (images, video, PDF, Office files). Folders, URLs and other systems open normally.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.

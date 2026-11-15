@@ -152,6 +152,103 @@ pub fn open(target: &Target) {
     open_system(arg);
 }
 
+/// A quick look at a file without leaving Herdr: macOS Quick Look. Folders, web
+/// links and other systems open normally.
+pub fn preview(target: &Target) {
+    match target {
+        #[cfg(target_os = "macos")]
+        Target::File(path) if path.is_file() => quick_look::show(path),
+        _ => open(target),
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod quick_look {
+    use std::ffi::{c_char, c_void};
+    use std::path::Path;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// The one preview on screen; a new one replaces it. Kept as the child so
+    /// it is only ever killed or reaped through its own handle.
+    static SHOWN: Mutex<Option<Child>> = Mutex::new(None);
+
+    pub fn show(path: &Path) {
+        let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(mut old) = shown.take() {
+            let _ = old.kill();
+            let _ = old.wait();
+        }
+        let spawned = Command::new("/usr/bin/qlmanage").arg("-p").arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+        let child = match spawned {
+            Ok(child) => child,
+            Err(e) => return tracing::warn!("cannot run qlmanage: {e}"),
+        };
+        let pid = child.id();
+        *shown = Some(child);
+        drop(shown);
+        std::thread::spawn(move || watch(pid));
+    }
+
+    /// qlmanage starts in the background with its window off screen until it is
+    /// activated; then reap it once its window closes.
+    fn watch(pid: u32) {
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(100));
+            if unsafe { activate(pid as i32) } {
+                break;
+            }
+        }
+        loop {
+            {
+                let mut shown = SHOWN.lock().unwrap_or_else(|e| e.into_inner());
+                match shown.as_mut() {
+                    Some(child) if child.id() == pid => {
+                        if !matches!(child.try_wait(), Ok(None)) {
+                            *shown = None;
+                            return;
+                        }
+                    }
+                    // Replaced, and reaped by its replacement.
+                    _ => return,
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    #[link(name = "objc")]
+    unsafe extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+        fn objc_autoreleasePoolPush() -> *mut c_void;
+        fn objc_autoreleasePoolPop(pool: *mut c_void);
+    }
+
+    /// `[[NSRunningApplication runningApplicationWithProcessIdentifier:pid]
+    /// activateWithOptions:]`, true once it is the active app.
+    unsafe fn activate(pid: i32) -> bool {
+        type ForPid = unsafe extern "C" fn(*mut c_void, *mut c_void, i32) -> *mut c_void;
+        type Activate = unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> bool;
+        type IsActive = unsafe extern "C" fn(*mut c_void, *mut c_void) -> bool;
+        unsafe {
+            let pool = objc_autoreleasePoolPush();
+            let send = objc_msgSend as *const ();
+            let class = objc_getClass(c"NSRunningApplication".as_ptr());
+            let app = std::mem::transmute::<*const (), ForPid>(send)(class, sel_registerName(c"runningApplicationWithProcessIdentifier:".as_ptr()), pid);
+            let active = !app.is_null() && {
+                // NSApplicationActivateAllWindows | NSApplicationActivateIgnoringOtherApps
+                std::mem::transmute::<*const (), Activate>(send)(app, sel_registerName(c"activateWithOptions:".as_ptr()), 3);
+                std::mem::transmute::<*const (), IsActive>(send)(app, sel_registerName(c"isActive".as_ptr()))
+            };
+            objc_autoreleasePoolPop(pool);
+            active
+        }
+    }
+}
+
 #[cfg(windows)]
 fn open_system(arg: &std::ffi::OsStr) {
     use std::os::windows::ffi::OsStrExt;

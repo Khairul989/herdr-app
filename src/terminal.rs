@@ -1276,9 +1276,20 @@ fn mouse_mods(m: Modifiers) -> GhosttyMods {
     mods
 }
 
-fn link_mods(m: &Modifiers) -> bool {
+/// What clicking a link does: the link key opens it, adding Shift previews it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum LinkClick {
+    Open,
+    Preview,
+}
+
+fn link_click(m: &Modifiers) -> Option<LinkClick> {
     let key = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
-    key && !m.alt && !m.shift
+    (key && !m.alt).then_some(if m.shift { LinkClick::Preview } else { LinkClick::Open })
+}
+
+fn link_mods(m: &Modifiers) -> bool {
+    link_click(m).is_some()
 }
 
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
@@ -2193,10 +2204,11 @@ impl Render for TerminalView {
                     g.core.resize(ch, g.vt.cols, g.vt.rows);
                 }
                 drop(g);
-                if link_mods(&ev.modifiers)
+                if let Some(click) = link_click(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
+                        LinkTarget::External(target) if click == LinkClick::Preview => links::preview(&target),
                         LinkTarget::External(target) => links::open(&target),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
@@ -2424,8 +2436,18 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{LinkClick, ScrollTarget, link_click, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn link_key_opens_and_shift_previews() {
+        let key = if cfg!(target_os = "macos") { Modifiers { platform: true, ..Default::default() } } else { Modifiers { control: true, ..Default::default() } };
+        assert_eq!(link_click(&key), Some(LinkClick::Open));
+        assert_eq!(link_click(&Modifiers { shift: true, ..key }), Some(LinkClick::Preview));
+        assert_eq!(link_click(&Modifiers { alt: true, ..key }), None);
+        assert_eq!(link_click(&Modifiers { shift: true, ..Default::default() }), None);
+        assert_eq!(link_click(&Modifiers::default()), None);
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {
