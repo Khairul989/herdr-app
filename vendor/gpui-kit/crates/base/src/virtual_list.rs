@@ -33,6 +33,7 @@ struct VirtualListScrollHandleState {
     /// Content bounds size (excluding padding and border) from the last frame.
     last_content_size: Option<Size<Pixels>>,
     pub deferred_scroll_to_item: Option<DeferredScrollToItem>,
+    // HERDR: `scroll_to_bottom` was asked for; the last row is known when the list is drawn.
     pub deferred_scroll_to_bottom: bool,
     // HERDR: item-anchored scroll. The request is (item index, px below that
     // item's start); `last_item_layout` is the origins/sizes of the last
@@ -132,6 +133,9 @@ impl VirtualListScrollHandle {
 
     /// Scrolls to the bottom of the list.
     pub fn scroll_to_bottom(&self) {
+        // HERDR: the last row is picked when the list is drawn, not here. The
+        // count kept here is the last frame's: zero before the first one, and
+        // short by the rows the caller has just added.
         let mut state = self.state.borrow_mut();
         state.deferred_scroll_to_item = None;
         state.deferred_scroll_to_anchor = None;

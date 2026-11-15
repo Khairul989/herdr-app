@@ -72,6 +72,8 @@ pub use input_tokens::{
 };
 pub(crate) mod dependencies;
 pub mod dock;
+mod drag_paths;
+pub use drag_paths::DraggedPaths;
 pub(crate) mod engine;
 pub(crate) mod entities;
 pub(crate) mod error;
@@ -133,7 +135,7 @@ pub use runtime::{
 pub use scope::{ScopePhase, with_current_app};
 pub use snapshot::RenderSnapshot;
 pub use view::ScriptView;
-pub use watch::{SourceWatcher, Watcher};
+pub use watch::Watcher;
 
 use std::path::PathBuf;
 
