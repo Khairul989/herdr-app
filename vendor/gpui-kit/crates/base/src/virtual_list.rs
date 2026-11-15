@@ -34,6 +34,11 @@ struct VirtualListScrollHandleState {
     last_content_size: Option<Size<Pixels>>,
     pub deferred_scroll_to_item: Option<DeferredScrollToItem>,
     pub deferred_scroll_to_bottom: bool,
+    // HERDR: item-anchored scroll. The request is (item index, px below that
+    // item's start); `last_item_layout` is the origins/sizes of the last
+    // prepaint, which `anchor()` reads.
+    deferred_scroll_to_anchor: Option<(usize, Pixels)>,
+    last_item_layout: Option<(Rc<[Pixels]>, Rc<[Pixels]>)>,
 }
 
 /// A scroll handle for [`VirtualList`].
@@ -95,6 +100,8 @@ impl VirtualListScrollHandle {
                 last_content_size: None,
                 deferred_scroll_to_item: None,
                 deferred_scroll_to_bottom: false,
+                deferred_scroll_to_anchor: None,
+                last_item_layout: None,
             })),
             base_handle: ScrollHandle::default(),
         }
@@ -114,6 +121,7 @@ impl VirtualListScrollHandle {
     fn scroll_to_item_with_offset(&self, ix: usize, strategy: ScrollStrategy, offset: usize) {
         let mut state = self.state.borrow_mut();
         state.deferred_scroll_to_bottom = false;
+        state.deferred_scroll_to_anchor = None;
         state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
@@ -126,7 +134,31 @@ impl VirtualListScrollHandle {
     pub fn scroll_to_bottom(&self) {
         let mut state = self.state.borrow_mut();
         state.deferred_scroll_to_item = None;
+        state.deferred_scroll_to_anchor = None;
         state.deferred_scroll_to_bottom = true;
+    }
+
+    // HERDR: place the viewport start `offset` below the start of item `ix`,
+    // consumed in prepaint. Unlike `scroll_to_item`, it keeps the position
+    // inside the item, so a mod can restore a position it read with `anchor`.
+    pub fn scroll_to_item_offset(&self, ix: usize, offset: Pixels) {
+        let mut state = self.state.borrow_mut();
+        state.deferred_scroll_to_item = None;
+        state.deferred_scroll_to_bottom = false;
+        state.deferred_scroll_to_anchor = Some((ix, offset));
+    }
+
+    // HERDR: the first item ending below the viewport start and how far the
+    // viewport start sits below that item's start, from the last layout.
+    pub fn anchor(&self) -> Option<(usize, Pixels)> {
+        let state = self.state.borrow();
+        let (origins, sizes) = state.last_item_layout.as_ref()?;
+        let offset = self.base_handle.offset();
+        let top = -match state.axis {
+            Axis::Vertical => offset.y,
+            Axis::Horizontal => offset.x,
+        };
+        anchor_at(origins, sizes, top)
     }
 }
 
@@ -382,6 +414,22 @@ impl ItemSizeLayout {
             },
         })
     }
+}
+
+// HERDR: the first item whose end is past `top`, and `top` relative to its start.
+fn anchor_at(origins: &[Pixels], sizes: &[Pixels], top: Pixels) -> Option<(usize, Pixels)> {
+    let (mut low, mut high) = (0, origins.len());
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if origins[mid] + sizes[mid] <= top {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let ix = low;
+    let origin = *origins.get(ix)?;
+    Some((ix, (top - origin).max(px(0.))))
 }
 
 /// The items that intersect `viewport` along the list axis, plus one item of
@@ -640,6 +688,7 @@ impl Element for VirtualList {
         scroll_state.axis = axis;
         scroll_state.items_count = self.items_count;
         scroll_state.last_content_size = Some(content_bounds.size);
+        scroll_state.last_item_layout = Some((item_origins.clone(), item_sizes.clone()));
 
         let mut scroll_offset = self.scroll_handle.offset();
         // Align the content edge, including when the final item exceeds the viewport.
@@ -650,6 +699,16 @@ impl Element for VirtualList {
                 scroll_offset.x = content_bounds.size.width - layout.size_layout.content_size.width;
             }
         }
+        // HERDR: an index past the end leaves the offset alone.
+        if let Some((ix, below)) = scroll_state.deferred_scroll_to_anchor.take() {
+            if let Some(origin) = layout.size_layout.origins.get(ix) {
+                if axis.is_vertical() {
+                    scroll_offset.y = -(*origin + below);
+                } else {
+                    scroll_offset.x = -(*origin + below);
+                }
+            }
+        }
         if let Some(scroll_to_item) = scroll_state.deferred_scroll_to_item.take() {
             scroll_offset = self.scroll_to_deferred_item(
                 scroll_offset,
@@ -658,6 +717,10 @@ impl Element for VirtualList {
                 scroll_to_item,
             );
         }
+
+        // HERDR: release the handle state before items render: a script may
+        // read `anchor()` from the item callback.
+        drop(scroll_state);
 
         scroll_offset = scroll_offset
             .max(&point(
@@ -913,5 +976,170 @@ mod tests {
 
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(visible_ranges.borrow().is_empty());
+    }
+
+    // HERDR: a harness whose rows have mixed heights and can be prepended to.
+    fn anchor_harness(
+        cx: &mut TestAppContext,
+        heights: Vec<f32>,
+    ) -> (
+        VirtualListScrollHandle,
+        gpui::Entity<VirtualListHarness>,
+        &mut gpui::VisualTestContext,
+    ) {
+        let scroll_handle = VirtualListScrollHandle::new();
+        let (view, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            move |_, _| VirtualListHarness {
+                axis: Axis::Vertical,
+                item_sizes: Rc::new(heights.iter().map(|h| size(px(10.), px(*h))).collect()),
+                scroll_handle,
+                visible_ranges: Rc::new(RefCell::new(Vec::new())),
+            }
+        });
+        (scroll_handle, view, cx)
+    }
+
+    fn draw(cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn prepend(
+        view: &gpui::Entity<VirtualListHarness>,
+        cx: &mut gpui::VisualTestContext,
+        heights: &[f32],
+    ) {
+        view.update(cx, |harness, _| {
+            let mut sizes: Vec<_> = heights.iter().map(|h| size(px(10.), px(*h))).collect();
+            sizes.extend(harness.item_sizes.iter().copied());
+            harness.item_sizes = Rc::new(sizes);
+        });
+    }
+
+    fn anchor_px(handle: &VirtualListScrollHandle) -> Option<(usize, f32)> {
+        handle.anchor().map(|(ix, offset)| (ix, f32::from(offset)))
+    }
+
+    const MIXED: [f32; 8] = [20., 35., 12., 40., 25., 50., 18., 60.];
+
+    #[gpui::test]
+    fn scroll_to_item_offset_restores_the_anchor_after_a_prepend(cx: &mut TestAppContext) {
+        let (handle, view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        // Item 3 starts at 67; 84 puts the viewport 17px into it.
+        handle.set_offset(point(px(0.), px(-84.)));
+        draw(cx);
+        assert_eq!(anchor_px(&handle), Some((3, 17.)));
+
+        let added = [30., 14., 22.];
+        prepend(&view, cx, &added);
+        handle.scroll_to_item_offset(3 + added.len(), px(17.));
+        draw(cx);
+        let (ix, offset) = anchor_px(&handle).unwrap();
+        assert_eq!(ix, 6);
+        assert!((offset - 17.).abs() < 0.5, "offset was {offset}");
+    }
+
+    #[gpui::test]
+    fn scroll_to_item_top_loses_the_offset_the_anchor_keeps(cx: &mut TestAppContext) {
+        // Control: the same setup through scroll_to_item("top") must differ.
+        let (handle, view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        handle.set_offset(point(px(0.), px(-84.)));
+        draw(cx);
+        let added = [30., 14., 22.];
+        prepend(&view, cx, &added);
+        handle.scroll_to_item(3 + added.len(), ScrollStrategy::Top);
+        draw(cx);
+        // The row is only revealed minimally, so the same row is not left 17px in.
+        let (ix, offset) = anchor_px(&handle).unwrap();
+        assert!(ix != 6 || (offset - 17.).abs() > 0.5, "anchor was {ix}, {offset}");
+    }
+
+    #[gpui::test]
+    fn scroll_to_item_offset_clamps_past_the_end(cx: &mut TestAppContext) {
+        let (handle, _view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        // Content is 260px in a 60px viewport.
+        handle.scroll_to_item_offset(7, px(500.));
+        draw(cx);
+        assert_eq!(handle.offset().y, px(-200.));
+    }
+
+    #[gpui::test]
+    fn scroll_to_item_offset_ignores_an_out_of_range_index(cx: &mut TestAppContext) {
+        let (handle, _view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        handle.set_offset(point(px(0.), px(-84.)));
+        draw(cx);
+        handle.scroll_to_item_offset(99, px(5.));
+        draw(cx);
+        assert_eq!(handle.offset().y, px(-84.));
+    }
+
+    #[gpui::test]
+    fn the_last_scroll_request_in_a_frame_wins(cx: &mut TestAppContext) {
+        let (handle, _view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        handle.scroll_to_item_offset(1, px(5.));
+        handle.scroll_to_bottom();
+        draw(cx);
+        assert_eq!(handle.offset().y, px(-200.));
+
+        handle.scroll_to_bottom();
+        handle.scroll_to_item_offset(1, px(5.));
+        draw(cx);
+        assert_eq!(handle.offset().y, px(-25.));
+    }
+
+    // HERDR: a script reads `anchor()` from inside the item callback while the list lays out.
+    struct AnchorReadingHarness {
+        scroll_handle: VirtualListScrollHandle,
+        seen: Rc<RefCell<Vec<Option<(usize, Pixels)>>>>,
+    }
+
+    impl Render for AnchorReadingHarness {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let handle = self.scroll_handle.clone();
+            let seen = self.seen.clone();
+            let sizes = Rc::new(MIXED.iter().map(|h| size(px(10.), px(*h))).collect::<Vec<_>>());
+            let item_sizes = sizes.clone();
+            virtual_list(cx.entity(), "anchor-reading", Axis::Vertical, sizes, move |_, range, _, _| {
+                seen.borrow_mut().push(handle.anchor());
+                range.map(|ix| div().w(item_sizes[ix].width).h(item_sizes[ix].height)).collect::<Vec<_>>()
+            })
+            .track_scroll(&self.scroll_handle)
+            .w(px(60.))
+            .h(px(60.))
+        }
+    }
+
+    #[gpui::test]
+    fn anchor_can_be_read_from_the_item_callback_during_layout(cx: &mut TestAppContext) {
+        let scroll_handle = VirtualListScrollHandle::new();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        let (_, cx) = cx.add_window_view({
+            let scroll_handle = scroll_handle.clone();
+            let seen = seen.clone();
+            move |_, _| AnchorReadingHarness { scroll_handle, seen }
+        });
+        draw(cx);
+        scroll_handle.scroll_to_item_offset(3, px(17.));
+        draw(cx);
+        draw(cx);
+        assert!(seen.borrow().len() >= 2, "the item callback ran: {:?}", seen.borrow());
+        assert_eq!(scroll_handle.anchor().map(|(ix, _)| ix), Some(3));
+    }
+
+    #[gpui::test]
+    fn anchor_is_none_before_layout_and_without_items(cx: &mut TestAppContext) {
+        assert_eq!(VirtualListScrollHandle::new().anchor(), None);
+        let (handle, _view, cx) = anchor_harness(cx, MIXED.to_vec());
+        draw(cx);
+        assert!(handle.anchor().is_some());
+
+        let (empty, _view, cx) = anchor_harness(cx, Vec::new());
+        draw(cx);
+        assert_eq!(empty.anchor(), None);
     }
 }

@@ -33,6 +33,80 @@ pub(super) fn with_policy(view: TextView, policy: Rc<Policy>) -> impl IntoElemen
     PolicyTextView { view, policy }
 }
 
+// HERDR: presents the inline math the native parser recognised through a mod's callback.
+// The route is the Send + Sync handle to a script callback; only `render_inline`, which
+// runs on the main thread during layout, calls it. `parse` never touches the script.
+pub(super) struct InlineMathPlugin {
+    route: crate::script_callback::ScriptCallbackRoute,
+}
+
+impl InlineMathPlugin {
+    pub(super) fn new(route: crate::script_callback::ScriptCallbackRoute) -> Self {
+        Self { route }
+    }
+}
+
+/// `$tex$` that reads as math: not `$$`, no space just inside either `$`, and no digit
+/// right after the closing `$`. That last rule keeps "costs $5 and $10" literal; the
+/// native parser alone would claim `$5 and $` as math. Declined nodes are rendered as
+/// source, exactly as when no plugin is installed.
+fn is_inline_math(source: &str, following: Option<u8>) -> bool {
+    let Some(tex) = source
+        .strip_prefix('$')
+        .and_then(|rest| rest.strip_suffix('$'))
+    else {
+        return false;
+    };
+    let (Some(first), Some(last)) = (tex.chars().next(), tex.chars().next_back()) else {
+        return false;
+    };
+    first != '$'
+        && first != '`'
+        && !first.is_whitespace()
+        && !last.is_whitespace()
+        && !following.is_some_and(|byte| byte.is_ascii_digit())
+}
+
+impl gpui_base::MarkdownPlugin for InlineMathPlugin {
+    fn name(&self) -> &str {
+        "herdr-inline-math"
+    }
+
+    fn parse(
+        &self,
+        node: &gpui_base::markdown_ast::Node,
+        cx: &gpui_base::MarkdownParseContext<'_>,
+    ) -> Option<gpui_base::MarkdownNode> {
+        let gpui_base::markdown_ast::Node::InlineMath(math) = node else {
+            return None;
+        };
+        let source = cx.node_source(node)?;
+        let end = node.position()?.end.offset;
+        is_inline_math(source, cx.source().as_bytes().get(end).copied())
+            .then(|| gpui_base::MarkdownNode::new("herdr-inline-math", math.value.clone()))
+    }
+
+    fn render_inline(
+        &self,
+        node: &gpui_base::MarkdownNode,
+        context: &gpui_base::InlineRenderContext,
+        window: &mut gpui::Window,
+        cx: &mut gpui::App,
+    ) -> Option<gpui_base::InlineElement> {
+        let tex = node.data::<String>()?;
+        // The source slice with its delimiters; the parser keeps it as the node's text.
+        let (element, baseline) = self.route.inline_math(
+            (tex, node.as_text()),
+            f32::from(context.font_size()),
+            f32::from(context.line_height()),
+            crate::engine::theme_hex(context.text_style().color),
+            window,
+            cx,
+        )?;
+        Some(gpui_base::InlineElement::new(element).with_baseline(gpui::px(baseline)))
+    }
+}
+
 /// CLI check constructs elements without drawing. Only layout may initialize
 /// the keyed image owner; GPUI's Asset still owns all loading and notifications.
 struct PolicyTextView {
@@ -359,3 +433,21 @@ fn animation_frames(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod inline_math_tests {
+    use super::is_inline_math as claims;
+
+    #[test]
+    fn only_dollar_delimited_math_that_reads_as_math_is_claimed() {
+        assert!(claims("$x$", None));
+        assert!(claims("$x^2$", Some(b' ')));
+        assert!(claims("$a$", Some(b'.')));
+        assert!(!claims("$5 and $", Some(b'1')), "currency: a digit follows the closing dollar");
+        assert!(!claims("$ x$", None));
+        assert!(!claims("$x $", None));
+        assert!(!claims("$$x$$", None));
+        assert!(!claims("$$", None));
+        assert!(!claims("$`x`$", None));
+    }
+}

@@ -2416,6 +2416,17 @@ const BASE: &str = r#"  /** A row. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /** Shows Copy Markdown / Copy CSV below each Markdown table and reports clicks. */
+    on_table_action(handler: (action: "markdown" | "csv", table: { headers: string[]; rows: string[][]; markdown: string }, cx: Context) => void): this;
+    /**
+     * Presents inline math the native parser recognised (`$x^2$`; currency such as
+     * `$5 and $10` stays text). `render` runs during layout and must only read caches:
+     * return `{ element, baseline }` (baseline = distance from the element's top to its
+     * alphabetic baseline, logical px) or null for the readable source. `source` keeps its
+     * delimiters and is what copy returns. Changing `revision` with the same text lays the
+     * formulas out again. Feature-detect with `"inline_math" in view`.
+     */
+    inline_math(render: (node: { tex: string; source: string }, context: { font_size: number; line_height: number; foreground: string }) => { element: Element; baseline: number } | null, revision: number): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -2423,6 +2434,8 @@ const BASE: &str = r#"  /** A row. */
     html(id: string, html: string): TextViewElement;
     markdown(id: string, markdown: string): TextViewElement;
   };
+  /** HERDR: the text currently selected in this window's TextViews, as Cmd+C would copy it; "" when none. Live calls only (event handlers, timers), not render. */
+  export function selected_text(): string;
   /**
    * A tab list. It holds no selection of its own — each `Tab` is told whether
    * it is selected, and reports activation through `on_click`, so the script
@@ -3033,6 +3046,21 @@ const BASE: &str = r#"  /** A row. */
      */
     scroll_to_item(index: number, strategy?: "top" | "center"): void;
     scroll_to_bottom(): void;
+    /**
+     * Places the viewport top `offset` logical px below the top of item `index`,
+     * before the next frame, so a position read with `anchor()` can be restored
+     * after rows are prepended. The last of this, `scroll_to_item` and
+     * `scroll_to_bottom` requested in a frame wins; the result is clamped to the
+     * scroll range, and an index past the end is ignored. Feature-detect with
+     * `typeof handle.scroll_to_item_offset === "function"`.
+     */
+    scroll_to_item_offset(index: number, offset: number): void;
+    /**
+     * The first item whose bottom is below the viewport top, and how many logical
+     * px the viewport top sits below that item's top (>= 0), from the last layout.
+     * `null` before layout or with no items. Read-only; legal from render.
+     */
+    anchor(): { index: number; offset: number } | null;
     /** Actual laid-out scroll position, in logical pixels. Offsets increase downward.
      * viewportHeight is zero until the list has been laid out. Read-only; legal from render. */
     metrics(): { offsetY: number; maxOffsetY: number; viewportHeight: number };
@@ -3065,6 +3093,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** HERDR: the caret (start == end) or the selection, in UTF-16 offsets. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3134,6 +3164,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** HERDR: the caret (start == end) or the selection, in UTF-16 offsets. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3178,6 +3210,8 @@ const BASE: &str = r#"  /** A row. */
     next_search_match(): EditorSearchInfo;
     previous_search_match(): EditorSearchInfo;
     close_search(): void;
+    /** HERDR: "always" keeps the scrollbars painted; null follows the theme's mode. */
+    set_scrollbar(mode: "always" | "hover" | "scrolling" | null): void;
     /** Replace the current match or every match as an undoable edit. Readonly editors return zero. */
     replace_search(text: string, all?: boolean): number;
     value(): string;
@@ -3202,6 +3236,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** HERDR: "always" keeps the scrollbars painted; "hover" / "scrolling" follow those modes. Defaults to the theme's mode. */
+      scrollbar?: "always" | "hover" | "scrolling";
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
@@ -4714,6 +4750,8 @@ mod tests {
             .expect("end of Element declaration")
             .0;
         assert!(!element.contains("on_link_click("));
+        assert!(!element.contains("on_table_action("));
+        assert!(!element.contains("inline_math("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));

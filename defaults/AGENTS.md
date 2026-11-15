@@ -46,7 +46,9 @@ https://gpui-kit.com. The Herdr app carries its own copy with additions
 `gpui-kit.d.ts` for elements and `herdr.d.ts` for the app's data and
 commands. They're rewritten on every start to match this version.
 For virtual lists, `VirtualListScrollHandle.metrics()` reports the actual scroll
-offset, limit and viewport height, so controls can detect reaching the bottom.
+offset, limit and viewport height, so controls can detect reaching the bottom;
+`anchor()` and `scroll_to_item_offset(index, offset)` read and restore a position as
+{row index, px into that row}, for example after rows are prepended.
 
 ## Changing things safely
 
@@ -1067,10 +1069,11 @@ the same limits, previews and removal as picked images.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them; `state.selected_range()` reads the caret or selection (UTF-16 offsets). Text: `TextView.markdown(id, text)` renders markdown (`.on_table_action((action, table, cx) => …)` adds Copy Markdown / Copy CSV below tables and reports `"markdown"|"csv"` with `{headers, rows, markdown}`; the mod writes the clipboard); `.inline_math((node, cx) => ({element, baseline}) | null, revision)` presents `$x$` math in the line (`node` `{tex, source}`, `cx` `{font_size, line_height, foreground}`; `baseline` = element top to text baseline in px; render-time, read caches only; null/throw/bad baseline shows the source, which copy returns; currency like `$5 and $10` is never offered; bump `revision` when your cache changes); `selected_text()` from `gpui-base` returns the text selected in TextViews as Cmd+C would copy it (`""` if none; event handlers and timers only, not render); `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. A viewer opens
+or editor with syntax highlighting, line numbers and folding
+(`scrollbar: "always"` keeps its scrollbars painted; `state.set_scrollbar(mode|null)` changes it later). A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 Code viewers include TypeScript (`ts`/`typescript`), TSX, JSX (using the

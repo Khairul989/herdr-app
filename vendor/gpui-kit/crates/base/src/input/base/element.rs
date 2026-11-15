@@ -193,6 +193,23 @@ impl EditorScrollbarLayout {
     }
 }
 
+// HERDR: an unset mode leaves the scrollbar on the theme's mode.
+fn editor_scrollbar(
+    scroll_handle: &gpui::ScrollHandle,
+    soft_wrap: bool,
+    mode: Option<crate::ScrollbarMode>,
+) -> Scrollbar {
+    let scrollbar = if !soft_wrap {
+        Scrollbar::new(scroll_handle)
+    } else {
+        Scrollbar::vertical(scroll_handle)
+    };
+    match mode {
+        Some(mode) => scrollbar.mode(mode),
+        None => scrollbar,
+    }
+}
+
 pub(super) struct EditorScrollbar<M: InputModeKind> {
     state: Entity<InputBaseState<M>>,
 }
@@ -257,14 +274,10 @@ impl<M: InputModeKind> Element for EditorScrollbar<M> {
             scroll_handle.set_offset(snapshot.cursor_scroll_offset);
         }
 
-        let mut scrollbar = if !snapshot.soft_wrap {
-            Scrollbar::new(&scroll_handle)
-        } else {
-            Scrollbar::vertical(&scroll_handle)
-        }
-        .viewport_bounds(snapshot.layout.bounds)
-        .scroll_size(snapshot.layout.scroll_size)
-        .into_any_element();
+        let mut scrollbar = editor_scrollbar(&scroll_handle, snapshot.soft_wrap, state.scrollbar_mode)
+            .viewport_bounds(snapshot.layout.bounds)
+            .scroll_size(snapshot.layout.scroll_size)
+            .into_any_element();
 
         scrollbar.prepaint_as_root(
             snapshot.layout.bounds.origin,
@@ -4310,6 +4323,21 @@ mod tests {
         assert_eq!(styles[1].0, 2..6);
         assert_eq!(styles[1].1.color, Some(gpui::red()));
         assert_eq!(styles[1].1.font_style, Some(gpui::FontStyle::Italic));
+    }
+
+    #[test]
+    fn editor_scrollbar_uses_an_explicit_mode_and_otherwise_the_theme() {
+        use crate::ScrollbarMode;
+        let handle = gpui::ScrollHandle::new();
+
+        let always = editor_scrollbar(&handle, false, Some(ScrollbarMode::Always));
+        assert_eq!(always.mode_override(), Some(ScrollbarMode::Always));
+        let wrapped = editor_scrollbar(&handle, true, Some(ScrollbarMode::Hover));
+        assert_eq!(wrapped.mode_override(), Some(ScrollbarMode::Hover));
+
+        // Unset stays unset, so the theme still decides.
+        assert_eq!(editor_scrollbar(&handle, false, None).mode_override(), None);
+        assert_eq!(editor_scrollbar(&handle, true, None).mode_override(), None);
     }
 
     #[test]

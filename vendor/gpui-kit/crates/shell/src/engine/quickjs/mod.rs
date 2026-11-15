@@ -1102,6 +1102,8 @@ mod lifecycle;
 mod standard;
 mod template;
 mod theme_api;
+// HERDR: the hex format `theme()` gives mods, for inline math's `foreground`.
+pub(crate) use theme_api::hex as theme_hex;
 mod window_api;
 
 /// The names each built-in module exports.
@@ -1208,6 +1210,8 @@ pub(crate) mod exports {
         // Theme (`theme_api`). The theme belongs to `gpui-base`, even though
         // mutation is legal only while a host call supplies the current App.
         "set_theme",
+        // HERDR: the text selected across TextViews.
+        "selected_text",
     ];
 
     /// The performance overlay, owned by `gpui-fps`: the element form, and
@@ -4515,10 +4519,10 @@ impl ShellRuntime {
         scheduler::drain_runtime_jobs(self, window, cx);
     }
 
-    pub(crate) fn dispatch_host_event(
+    pub(crate) fn dispatch_host_event_args(
         self: &Rc<Self>,
         id: CallbackId,
-        payload: HostValue,
+        payloads: Vec<HostValue>,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -4551,11 +4555,12 @@ impl ShellRuntime {
         );
         let result = self.with_js(|ctx| {
             let handler = entry.value.clone().restore(ctx)?;
-            let payload = host_modules::into_js(ctx, payload)?;
-            handler.call::<_, ()>((
-                payload,
-                context_object(ctx, ContextBinding::Call(generation))?,
-            ))
+            let mut args = JsArgs::new(ctx.clone(), payloads.len() + 1);
+            for payload in payloads {
+                args.push_arg(host_modules::into_js(ctx, payload)?)?;
+            }
+            args.push_arg(context_object(ctx, ContextBinding::Call(generation))?)?;
+            handler.call_arg::<()>(args)
         });
         if let Err(error) = result {
             tracing::error!("error in host component handler: {error}");
@@ -4901,6 +4906,68 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Option<gpui::AnyElement>> {
+        Ok(self
+            .dispatch_inline_element_with(
+                id,
+                arguments,
+                interactive,
+                |ctx, value| {
+                    if value.is_null() || value.is_undefined() {
+                        Ok(None)
+                    } else {
+                        element_id(ctx, &value).map(|root| Some((root, ())))
+                    }
+                },
+                window,
+                cx,
+            )?
+            .map(|(element, ())| element))
+    }
+
+    /// HERDR: presents one inline math node. A null or malformed result (no
+    /// element, a missing or non-finite baseline) is `None`, the readable-source
+    /// fallback; a throw is an `Err`.
+    pub(crate) fn dispatch_inline_math(
+        self: &Rc<Self>,
+        id: CallbackId,
+        arguments: &[ComponentDataValue],
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Option<(gpui::AnyElement, f32)>> {
+        self.dispatch_inline_element_with(
+            id,
+            arguments,
+            false,
+            |ctx, value| {
+                let Some(object) = value.as_object() else {
+                    return Ok(None);
+                };
+                let element: Value = object.get("element")?;
+                let baseline: Value = object.get("baseline")?;
+                let Some(baseline) = baseline.as_number().filter(|n| n.is_finite()) else {
+                    return Ok(None);
+                };
+                if element.is_null() || element.is_undefined() {
+                    return Ok(None);
+                }
+                element_id(ctx, &element).map(|root| Some((root, baseline as f32)))
+            },
+            window,
+            cx,
+        )
+    }
+
+    /// HERDR: the callback's value is read by `extract` while the script is still
+    /// running, so a handler may return an element plus data (an inline baseline).
+    pub(crate) fn dispatch_inline_element_with<T>(
+        self: &Rc<Self>,
+        id: CallbackId,
+        arguments: &[ComponentDataValue],
+        interactive: bool,
+        extract: impl for<'js> FnOnce(&Ctx<'js>, Value<'js>) -> JsResult<Option<(SpecId, T)>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Option<(gpui::AnyElement, T)>> {
         let entry = self
             .callbacks
             .borrow()
@@ -4965,15 +5032,11 @@ impl ShellRuntime {
                 }
                 args.push_arg(context_object(ctx, ContextBinding::Call(generation))?)?;
                 let value: Value = handler.call_arg(args)?;
-                if value.is_null() || value.is_undefined() {
-                    Ok(None)
-                } else {
-                    element_id(ctx, &value).map(Some)
-                }
+                extract(ctx, value)
             });
             let arena = temporary.finish();
             match described {
-                Ok(Some(root)) => {
+                Ok(Some((root, extra))) => {
                     if let Some(generation) = callback_generation {
                         self.callbacks.borrow_mut().commit();
                         callbacks.active = false;
@@ -4994,17 +5057,18 @@ impl ShellRuntime {
                         )?;
                         use gpui::{InteractiveElement as _, IntoElement as _, ParentElement as _};
                         // The frame's event table holds the lease until the next frame replaces it.
-                        Ok(Some(
+                        Ok(Some((
                             gpui::div()
                                 .child(element)
                                 .on_mouse_move(move |_, _, _| {
                                     let _ = &snapshot;
                                 })
                                 .into_any_element(),
-                        ))
+                            extra,
+                        )))
                     } else {
                         crate::materialize::try_materialize_subtree(self, &arena, root, window, cx)
-                            .map(Some)
+                            .map(|element| Some((element, extra)))
                     }
                 }
                 Ok(None) => Ok(None),
@@ -6206,7 +6270,7 @@ globalThis.__gpui = (() => {
   // to read it back off `this`.
   const tokenStateMethods = (handle, invoke) => Object.fromEntries([
     "content", "tokens", "replace_with_token", "replace_range_with_token",
-    "set_selected_range", "replace"
+    "set_selected_range", "selected_range", "replace"
   ].map(name => [name, (...args) => invoke(handle, name, args)]));
   // A value is plain text or a content snapshot with tokens.
   const setValue = (handle, setText, invoke) => (next) =>
@@ -6592,6 +6656,17 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    // HERDR: restore a position read with `anchor()`; see typings.
+    scroll_to_item_offset: (index, offset) => {
+      if (!Number.isInteger(index) || index < 0) {
+        throw new TypeError("scroll_to_item_offset(index, offset) needs a whole, non-negative index");
+      }
+      if (!Number.isFinite(offset) || offset < 0) {
+        throw new TypeError("scroll_to_item_offset(index, offset) needs a finite, non-negative offset");
+      }
+      __virtual_scroll_to_item_offset(handle, index, offset);
+    },
+    anchor: () => JSON.parse(__virtual_scroll_anchor(handle)),
     metrics: () => JSON.parse(__virtual_scroll_metrics(handle)),
     release: () => __virtual_scroll_release(handle),
   });
@@ -7116,6 +7191,7 @@ globalThis.__gpui = (() => {
           next_search_match: () => JSON.parse(__editor_search(handle, "next", "", false)),
           previous_search_match: () => JSON.parse(__editor_search(handle, "previous", "", false)),
           close_search: () => { __editor_search(handle, "close", "", false); },
+          set_scrollbar: (mode) => __editor_set_scrollbar(handle, JSON.stringify(mode ?? null)),
           replace_search: (text, all = false) => __editor_replace_search(handle, String(text), !!all),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),
@@ -7258,6 +7334,8 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_table_action",
+                "inline_math",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -7938,6 +8016,7 @@ impl ShellRuntime {
             host::install(ctx, &module)?;
             host_modules::install(ctx)?;
             theme_api::install(ctx, &module)?;
+            window_api::install_selected_text(&module)?;
             entity_api::install(ctx, &module, runtime.clone())?;
             dock_api::install(ctx, &module, runtime.clone())?;
             scheduler::install(ctx, &module)?;
@@ -8250,6 +8329,8 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_table_action"
+            | "inline_math"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8310,6 +8391,31 @@ impl ShellRuntime {
                     registered_in: scope::current_generation(),
                 });
                 let name = callback_op_name(method).expect("this arm's own list");
+                // HERDR: `inline_math(render, revision)` also records its revision.
+                if method == "inline_math" {
+                    let revision = match args.0.get(1) {
+                        None | Some(Argument::Value(Bridged::Nil)) => 0.0,
+                        Some(Argument::Value(Bridged::Number(number))) if number.is_finite() => {
+                            *number
+                        }
+                        _ => {
+                            return Err(Exception::throw_type(
+                                ctx,
+                                "inline_math(render, revision) expects a finite number second",
+                            ));
+                        }
+                    };
+                    self.push_op_checked(
+                        ctx,
+                        self.push_op(
+                            id,
+                            SpecOp::Method(
+                                "inline_math_revision",
+                                smallvec::smallvec![Bridged::Number(revision)],
+                            ),
+                        ),
+                    )?;
+                }
                 self.push_op_checked(ctx, self.push_op(id, SpecOp::Callback(name, callback)))
             }
             "disabled"
@@ -10250,6 +10356,8 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_table_action" => "on_table_action",
+        "inline_math" => "inline_math",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",

@@ -231,6 +231,8 @@ pub(crate) const METHODS: &[(&str, &str, bool)] = &[
         false,
     ),
     ("set_selected_range", "(range: InputRange): void", false),
+    // HERDR: read the caret or selection, so mods can complete at the cursor.
+    ("selected_range", "(): InputRange", true),
     ("replace", "(text: string): void", false),
 ];
 
@@ -269,6 +271,10 @@ macro_rules! state_binding {
                         state.replace_range_with_token(range, token, window, cx)
                     })?;
                     Ok(Data::Null)
+                }
+                ("selected_range", []) => {
+                    let state = entity.read(cx);
+                    Ok(range_data(&state.value(), state.selected_range()))
                 }
                 ("set_selected_range", [value]) => {
                     let range = range(&entity.read(cx).value(), value)?;

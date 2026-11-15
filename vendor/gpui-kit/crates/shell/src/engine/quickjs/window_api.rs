@@ -285,6 +285,35 @@ fn mouse_position<'js>(ctx: Ctx<'js>) -> JsResult<Object<'js>> {
     Ok(object)
 }
 
+/// HERDR: `selected_text()` from `gpui-base`, the text Cmd+C would copy.
+///
+/// Refused during render and layout like `set_theme`: the selection changes with
+/// pointer events, so a render that reads it would draw stale text.
+pub(super) fn install_selected_text(module: &Object<'_>) -> JsResult<()> {
+    module.set(
+        "selected_text",
+        Func::from(|ctx: Ctx<'_>| -> JsResult<String> {
+            if matches!(
+                scope::current_phase(),
+                Some(ScopePhase::Render) | Some(ScopePhase::Layout)
+            ) {
+                return Err(Exception::throw_type(
+                    &ctx,
+                    "selected_text() cannot run during render or layout; read the selection \
+                     from an event handler or task",
+                ));
+            }
+            scope::with_current(|window, app| gpui_base::TextSelection::selected_text(window, app))
+                .ok_or_else(|| {
+                    Exception::throw_type(
+                        &ctx,
+                        "selected_text() needs a live host call; call it from an event handler or a task",
+                    )
+                })
+        }),
+    )
+}
+
 /// The four platform appearances, as the two a script can act on.
 ///
 /// The vibrancy variants differ in how the platform paints *behind* the

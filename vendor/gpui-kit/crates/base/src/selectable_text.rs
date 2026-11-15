@@ -295,6 +295,115 @@ mod tests {
         });
     }
 
+    // HERDR: observes whether a mod button's click handler can still read the selection (it cannot).
+    struct SelectionAndButtonView {
+        seen: std::rc::Rc<std::cell::RefCell<Option<(bool, String)>>>,
+    }
+
+    impl Render for SelectionAndButtonView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui::{InteractiveElement as _, StatefulInteractiveElement as _};
+            let seen = self.seen.clone();
+            div()
+                .size_full()
+                .child(TextSelectionLayer)
+                .child(
+                    div()
+                        .w(px(240.))
+                        .h(px(32.))
+                        .child(SelectableText::new("local", "alpha beta")),
+                )
+                .child(
+                    div()
+                        .id("quote")
+                        .absolute()
+                        .top(px(100.))
+                        .left(px(0.))
+                        .w(px(100.))
+                        .h(px(30.))
+                        .on_click(move |_, window, cx| {
+                            *seen.borrow_mut() = Some((
+                                TextSelection::has_selection(window, cx),
+                                TextSelection::selected_text(window, cx),
+                            ));
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn mouse_down_on_a_plain_clickable_div_clears_the_text_selection_before_its_click_handler_runs(
+        cx: &mut TestAppContext,
+    ) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let handler_seen = seen.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| SelectionAndButtonView { seen: handler_seen });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(point(px(1.), px(12.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(px(220.), px(12.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(point(px(220.), px(12.)), MouseButton::Left, Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+            assert_eq!(TextSelection::selected_text(window, cx), "alpha beta");
+        });
+
+        let button = point(px(50.), px(115.));
+        cx.simulate_mouse_down(button, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(button, MouseButton::Left, Modifiers::default());
+
+        let observed = seen.borrow().clone();
+        assert_eq!(
+            observed,
+            Some((false, String::new())),
+            "the click handler runs, and finds the selection already cleared by the mouse down"
+        );
+    }
+
+    // HERDR: a container's mouse-up after a drag on its text can read the finished selection.
+    struct SelectionMouseUpView {
+        seen: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+    }
+
+    impl Render for SelectionMouseUpView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            use gpui::InteractiveElement as _;
+            let seen = self.seen.clone();
+            div().size_full().child(TextSelectionLayer).child(
+                div()
+                    .w(px(240.))
+                    .h(px(32.))
+                    .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                        seen.borrow_mut().push(TextSelection::selected_text(window, cx));
+                    })
+                    .child(SelectableText::new("local", "alpha beta")),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_container_mouse_up_after_a_drag_reads_the_selected_text(cx: &mut TestAppContext) {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let handler_seen = seen.clone();
+        let (_, cx) = cx.add_window_view(move |_, _| SelectionMouseUpView { seen: handler_seen });
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        cx.simulate_mouse_down(point(px(1.), px(12.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            point(px(220.), px(12.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.simulate_mouse_up(point(px(220.), px(12.)), MouseButton::Left, Modifiers::default());
+        assert_eq!(seen.borrow().last().map(String::as_str), Some("alpha beta"));
+    }
+
     #[test]
     fn wrapped_selection_paints_full_width_middle_lines() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(100.)));
