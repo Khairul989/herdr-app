@@ -92,7 +92,7 @@ const SKIPPED_DIRECTORIES: [&str; 2] = ["node_modules", "target"];
 /// The watcher answers one question — "has the tree settled after a change?" —
 /// and deliberately does not know what to do about it. Deciding to reload, and
 /// what to do when the reload fails, belongs to the host.
-pub struct SourceWatcher {
+pub(crate) struct SourceWatcher {
     directory: PathBuf,
     debounce: Duration,
     /// The stamp reported by the last scan. A change is a difference from this.
@@ -111,7 +111,7 @@ impl SourceWatcher {
     /// starting a watcher does not itself look like a change.
     ///
     /// [`poll`]: Self::poll
-    pub fn new(directory: PathBuf) -> Result<Self> {
+    pub(crate) fn new(directory: PathBuf) -> Result<Self> {
         let stamp = scan(&directory)?;
         Ok(Self {
             directory,
@@ -144,7 +144,7 @@ impl SourceWatcher {
     /// which is a change like any other and then stays quiet. A source tree
     /// beyond the scan limit returns an error rather than being watched only
     /// partially.
-    pub fn poll(&mut self) -> Result<bool> {
+    pub(crate) fn poll(&mut self) -> Result<bool> {
         let stamp = scan(&self.directory)?;
         if stamp != self.stamp {
             self.stamp = stamp;

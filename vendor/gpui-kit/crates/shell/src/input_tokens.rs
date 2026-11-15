@@ -3,7 +3,7 @@ use crate::{ComponentDataValue as Data, StateMethodDescriptor};
 use anyhow::{Result, anyhow, bail};
 use gpui::{App, Entity, Window};
 use gpui_base::input::{
-    InlineToken, InlineTokenClickEvent, InlineTokenContext, InlineTokenError,
+    EditorState, InlineToken, InlineTokenClickEvent, InlineTokenContext, InlineTokenError,
     InlineTokenHoverEvent, InputContent, InputState, Rope, RopeExt as _, TextareaState,
 };
 use std::rc::Rc;
@@ -231,7 +231,6 @@ pub(crate) const METHODS: &[(&str, &str, bool)] = &[
         false,
     ),
     ("set_selected_range", "(range: InputRange): void", false),
-    // HERDR: read the caret or selection, so mods can complete at the cursor.
     ("selected_range", "(): InputRange", true),
     ("replace", "(text: string): void", false),
 ];
@@ -272,14 +271,14 @@ macro_rules! state_binding {
                     })?;
                     Ok(Data::Null)
                 }
-                ("selected_range", []) => {
-                    let state = entity.read(cx);
-                    Ok(range_data(&state.value(), state.selected_range()))
-                }
                 ("set_selected_range", [value]) => {
                     let range = range(&entity.read(cx).value(), value)?;
                     entity.update(cx, |state, cx| state.set_selected_range(range, cx));
                     Ok(Data::Null)
+                }
+                ("selected_range", []) => {
+                    let state = entity.read(cx);
+                    Ok(range_data(&state.value(), state.selected_range()))
                 }
                 ("replace", [text]) => {
                     let text = string(text)?;
@@ -307,6 +306,38 @@ macro_rules! state_binding {
 }
 state_binding!(InputState, invoke_input, input_token_state_methods);
 state_binding!(TextareaState, invoke_textarea, textarea_token_state_methods);
+/// HERDR: the selection operations of a source editor, so scripts can format
+/// the selection. Editors have no inline tokens.
+pub(crate) const EDITOR_METHODS: &[(&str, bool)] = &[
+    ("selected_range", true),
+    ("set_selected_range", false),
+    ("replace", false),
+];
+pub(crate) fn invoke_editor(
+    entity: &Entity<EditorState>,
+    name: &str,
+    args: &[Data],
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<Data> {
+    match (name, args) {
+        ("selected_range", []) => {
+            let state = entity.read(cx);
+            Ok(range_data(&state.value(), state.selected_range()))
+        }
+        ("set_selected_range", [value]) => {
+            let range = range(&entity.read(cx).value(), value)?;
+            entity.update(cx, |state, cx| state.set_selected_range(range, cx));
+            Ok(Data::Null)
+        }
+        ("replace", [text]) => {
+            let text = string(text)?;
+            entity.update(cx, |state, cx| state.replace(text, window, cx));
+            Ok(Data::Null)
+        }
+        _ => bail!("invalid arguments for editor state operation `{name}`"),
+    }
+}
 
 /// Script callbacks for one input's tokens, adapted to the native
 /// `token` / `on_token_click` builders of any Input or Textarea element.
