@@ -212,23 +212,51 @@ pub fn update() -> Result<String, String> {
 
 /// `hc update --version X`: at least X (a newer core stays). Cores before 0.1.5 lack it.
 pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
-    let mut cmd = crate::spawn::command(path());
-    cmd.args(["update", "--json"]);
+    update_reporting(at_least, |_| {}).map(|reply| reply["now"].as_str().unwrap_or("the latest").to_owned())
+}
+
+/// `hc update`, telling `step` each `progress:` line a source-built core
+/// reports while it runs (HC_PROGRESS asks for them). Ok: hc's JSON reply.
+pub fn update_reporting(at_least: Option<&str>, step: impl Fn(&str) + Send + 'static) -> Result<serde_json::Value, String> {
+    update_with(&path(), at_least, step)
+}
+
+fn update_with(bin: &Path, at_least: Option<&str>, step: impl Fn(&str) + Send + 'static) -> Result<serde_json::Value, String> {
+    use std::io::{BufRead, Read};
+    let mut cmd = crate::spawn::command(bin);
+    cmd.args(["update", "--json"]).env("HC_PROGRESS", "1");
     if let Some(v) = at_least {
         cmd.args(["--version", v]);
     }
-    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run hc update: {e}"))?;
-    let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
-    if out.status.success() {
-        let now = reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned();
+    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| format!("cannot run hc update: {e}"))?;
+    let stderr = child.stderr.take().expect("piped stderr");
+    // Progress lines go to `step` as they come; the rest is the error, if any.
+    let rest = std::thread::spawn(move || {
+        let (mut rest, mut reader, mut buf) = (String::new(), std::io::BufReader::new(stderr), Vec::new());
+        while reader.read_until(b'\n', &mut buf).is_ok_and(|n| n > 0) {
+            let line = String::from_utf8_lossy(&buf).trim_end().to_owned();
+            buf.clear();
+            match line.strip_prefix("progress: ") {
+                Some(text) => step(text),
+                None => rest.push_str(&(line + "\n")),
+            }
+        }
+        rest
+    });
+    let mut stdout = Vec::new();
+    child.stdout.take().expect("piped stdout").read_to_end(&mut stdout).map_err(|e| format!("hc update: {e}"))?;
+    let status = child.wait().map_err(|e| format!("hc update: {e}"))?;
+    let stderr = rest.join().unwrap_or_default();
+    let reply: serde_json::Value = serde_json::from_slice(&stdout).unwrap_or_default();
+    if status.success() {
         #[cfg(target_os = "macos")]
-        ensure_core_bundle(&now)?;
-        return Ok(now);
+        ensure_core_bundle(reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest"))?;
+        return Ok(reply);
     }
-    let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_default();
+    let err: serde_json::Value = serde_json::from_str(stderr.trim()).unwrap_or_default();
     let message = err.pointer("/error/message").and_then(|v| v.as_str()).map(str::to_owned);
     let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
-    Err(message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+    Err(message.map(|m| m + &hint).unwrap_or_else(|| stderr.trim().to_owned()))
 }
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
@@ -359,6 +387,41 @@ mod tests {
             assert_eq!(path(), good);
             assert_eq!(core.hello["selected"], replacement);
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_update_steps_arrive_in_order_and_stay_out_of_the_error() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+        let root = std::env::temp_dir().join(format!("herdr-core-steps-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let hc = root.join("hc");
+        let script = |body: &str| {
+            std::fs::write(&hc, format!("#!/bin/sh\n[ \"$HC_PROGRESS\" = 1 ] || exit 9\n{body}\n")).unwrap();
+            std::fs::set_permissions(&hc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let run = || {
+            let steps = Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen = steps.clone();
+            let marker = root.join("seen");
+            let result = update_with(&hc, None, move |s| {
+                std::fs::write(&marker, "").unwrap();
+                seen.lock().unwrap().push(s.to_owned());
+            });
+            (result, steps.lock().unwrap().clone())
+        };
+        // hc waits until the app has seen the first step: steps must arrive live, not at exit.
+        let seen = root.join("seen");
+        script(&format!("echo 'progress: Fetching upstream/master' >&2\nfor i in $(seq 100); do [ -e {seen} ] && break; sleep 0.05; done\n[ -e {seen} ] || exit 7\necho 'Compiling x' >&2\necho 'progress: Building' >&2\necho '{{\"now\":\"hc 0.1.22\",\"source\":\"/src\",\"updated\":true,\"merged\":3}}'", seen = seen.display()));
+        let (result, steps) = run();
+        assert_eq!(steps, ["Fetching upstream/master", "Building"]);
+        assert_eq!(result.unwrap()["merged"], 3);
+        script("echo 'progress: Fetching upstream/master' >&2\necho '{\"error\":{\"kind\":\"refused\",\"message\":\"source update failed: conflicts\",\"hint\":\"merge it\"}}' >&2\nexit 1");
+        let (result, steps) = run();
+        assert_eq!(steps, ["Fetching upstream/master"]);
+        assert_eq!(result.unwrap_err(), "source update failed: conflicts (merge it)");
         std::fs::remove_dir_all(root).unwrap();
     }
 
