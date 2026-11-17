@@ -1033,9 +1033,24 @@ configured in `.zshrc`. Native video fits within the visible panel when its layo
 On macOS 14+, the live webview disables background suspension so agent use can continue
 while the panel is hidden. Physical iPhones use **Refresh capture** to take a fresh screenshot.
 
-Real iPhones need pairing/trust, Developer Mode, and a signed XCTest runner. Configure
-`AGENT_DEVICE_IOS_TEAM_ID` and, when needed, a unique `AGENT_DEVICE_IOS_BUNDLE_ID` in the app's
-environment. See <https://oss.callstack.com/agent-device/docs/installation#ios-physical-device-prerequisites>.
+Real iPhones need pairing/trust, Developer Mode, and a signed XCTest runner. Save the signing
+team once; the panel and the helper pass it to every device-tools process, including the
+backend daemon that builds the runner:
+
+```sh
+node ~/.config/herdr-app/mods/devices/agent.mjs ios-register --device UDID --team TEAM_ID --bundle com.yourname.agentdevice.runner
+```
+
+This writes `device-tools/ios-signing.json` (`teamId`, `bundleId`, optional `signingIdentity`,
+`provisioningProfile`), builds the runner against that phone with device registration (a new
+phone or an expired free-team profile otherwise fails with `0xe8008012`), and clears the cached
+runner builds. Rerun it, without `--team`/`--bundle`, when a free-team profile expires (7 days).
+Signing writes to that Apple team: an App ID and a device slot. The first run on a phone also
+needs Settings > General > VPN & Device Management > Trust. The file's values win over exported
+`AGENT_DEVICE_IOS_*` variables. When opening a physical iPhone, the helper stops (through the
+backend's verified `daemon stop`) a daemon that started without the saved signing; with any
+live session it refuses and names the session instead.
+See <https://oss.callstack.com/agent-device/docs/installation#ios-physical-device-prerequisites>.
 Discovery does not prove that signing, captures, or input work on a physical phone.
 Physical iPhones use explicitly labelled captures and agent controls; live iPhone mirroring
 is not supported by this viewer.
