@@ -8,12 +8,52 @@ export function chooseDevice(devices, id, platform) {
   return matches[0];
 }
 
+// Physical iPhones run agent-device's XCTest runner, signed by the person's own team.
+// The backend daemon reads these variables from its own environment, fixed by
+// whichever process starts it, so every launch path passes the saved settings.
+export const SIGNING_ENV = { teamId: "AGENT_DEVICE_IOS_TEAM_ID", bundleId: "AGENT_DEVICE_IOS_BUNDLE_ID", signingIdentity: "AGENT_DEVICE_IOS_SIGNING_IDENTITY", provisioningProfile: "AGENT_DEVICE_IOS_PROVISIONING_PROFILE" };
+export const signingPath = root => `${root}/device-tools/ios-signing.json`;
+const SIGNING_HINT = "Physical iPhone signing: save teamId and bundleId in device-tools/ios-signing.json in the Herdr app folder, then run agent.mjs ios-register --device UDID, then close and open the device again. See the Devices section of AGENTS.md.";
+
+export function signingVars(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) throw new Error("ios-signing.json must hold a JSON object.");
+  const vars = {};
+  for (const [key, name] of Object.entries(SIGNING_ENV)) {
+    const value = config[key];
+    if (value === undefined || value === null || value === "") continue;
+    if (typeof value !== "string" || /[\0-\x1f]/.test(value)) throw new Error(`ios-signing.json: ${key} must be a single-line string.`);
+    vars[name] = value;
+  }
+  if (vars.AGENT_DEVICE_IOS_TEAM_ID && !/^[A-Z0-9]{10}$/.test(vars.AGENT_DEVICE_IOS_TEAM_ID)) throw new Error("ios-signing.json: teamId must be a 10-character Apple team ID.");
+  if (vars.AGENT_DEVICE_IOS_BUNDLE_ID && !/^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(vars.AGENT_DEVICE_IOS_BUNDLE_ID)) throw new Error("ios-signing.json: bundleId must be reverse-DNS, e.g. com.yourname.agentdevice.runner.");
+  return vars;
+}
+
+// A missing or unreadable file means no saved signing: commands run exactly as before.
+export async function readSigning(fs, root) {
+  let text;
+  try { text = await fs.readFile(signingPath(root), "utf8"); } catch { return {}; }
+  let config;
+  try { config = JSON.parse(text); } catch { throw new Error(`${signingPath(root)} is not valid JSON.`); }
+  return signingVars(config);
+}
+
+// The saved file wins over inherited variables on every launch path, so the panel and
+// the helper always start the daemon alike. Without saved settings the command and
+// argv are returned unchanged; never through a shell.
+export function withSigning(command, args, vars) {
+  const entries = Object.entries(vars);
+  return entries.length ? ["/usr/bin/env", [...entries.map(([name, value]) => `${name}=${value}`), command, ...args]] : [command, args];
+}
+
 export function result(r) {
   let reply;
   try { reply = JSON.parse(r.stdout); } catch {}
   if (r.code !== 0 || reply?.success !== true) {
     const error = reply?.error;
-    throw new Error([error?.message || r.stderr?.trim() || r.stdout?.trim() || "Device command failed.", error?.details?.hint || error?.hint].filter(Boolean).join("\n"));
+    const message = [error?.message || r.stderr?.trim() || r.stdout?.trim() || "Device command failed.", error?.details?.hint || error?.hint].filter(Boolean).join("\n");
+    const signing = /No Account for Team|valid iOS provisioning profile|0xe8008012|profile does not cover/i.test(message);
+    throw new Error(signing ? `${message}\n${SIGNING_HINT}` : message);
   }
   return reply.data;
 }
@@ -62,7 +102,9 @@ export class DeviceSession {
 
   async call(args, scoped = true) {
     const flags = scoped ? target(this.device, this.session) : [];
-    return result(await this.exec(this.node, [this.cli, ...args, ...flags, "--state-dir", this.state, "--json"], { timeout: 600000 }));
+    // The panel's exec has no env option, and Herdr's own environment rarely holds these.
+    const [command, argv] = withSigning(this.node, [this.cli, ...args, ...flags, "--state-dir", this.state, "--json"], await readSigning(this.fs, this.root));
+    return result(await this.exec(command, argv, { timeout: 600000 }));
   }
 
   async install() {
@@ -79,6 +121,11 @@ export class DeviceSession {
   }
 
   async ensureLiveTools() {
+    if (this.device?.platform === "ios" && this.device.kind === "device") {
+      const r = await this.exec(this.node, [`${this.root}/mods/devices/physical-build.mjs`, `${this.root}/device-tools`], { timeout: 600000 });
+      if (r.code !== 0) throw new Error(r.stderr || r.stdout || "Could not prepare real-iPhone video. Screenshots remain available.");
+      return;
+    }
     try {
       const metadata = JSON.parse(await this.fs.readFile(`${this.root}/device-tools/node_modules/expo-device-hub/package.json`, "utf8"));
       if (metadata.version === LIVE_VERSION) return;

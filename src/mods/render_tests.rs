@@ -510,7 +510,11 @@ fn devices_show_preview_first_and_keep_setup_behind_controls(cx: &mut TestAppCon
     }
     let phone = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.tools.device = {platform: 'ios', kind: 'device', id: 'phone'}; this.tools.opened = true;")).unwrap();
     assert!(phone.contains("Refresh capture"));
-    assert!(!phone.contains("Restart video"), "a physical iPhone has no live stream: {phone}");
+    assert!(phone.contains("Start live video"));
+    assert!(phone.contains("Experimental live iPhone video"));
+    let capture = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.tools.device = {platform: 'ios', kind: 'device', id: 'phone'}; this.tools.opened = true; this.liveReady = true; this.liveDevice = 'ios:device:phone'; this.showCapture = true; this.tools.frame = {path: '/tmp/fixture.png', width: 100, height: 200, capturedAt: 'fixture'};")).unwrap();
+    assert!(capture.contains("Show live video"));
+    assert!(capture.contains("Physical iPhone capture at fixture · screenshot"));
 }
 
 /// A mod's localStorage write lands on the executor; one that lands after the
