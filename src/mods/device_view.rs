@@ -31,6 +31,13 @@ pub fn build(copy: u64, args: ComponentArgs<'_>, window: &mut Window, cx: &mut A
 }
 
 #[cfg(any(target_os = "macos", test))]
+fn stream_bounds(bounds: gpui::Bounds<gpui::Pixels>, mask: gpui::Bounds<gpui::Pixels>) -> Option<gpui::Bounds<gpui::Pixels>> {
+    let clipped = bounds.intersect(&mask);
+    // A short panel or a fractional resize must not hide the entire native view.
+    (clipped.size.width > gpui::px(0.) && clipped.size.height > gpui::px(0.)).then_some(clipped)
+}
+
+#[cfg(any(target_os = "macos", test))]
 #[derive(Default)]
 struct ViewCache<K, P, V> { entries: std::collections::HashMap<K, (P, V)> }
 
@@ -48,6 +55,19 @@ impl<K: Eq + std::hash::Hash, P: PartialEq, V: Clone> ViewCache<K, P, V> {
 mod retention_tests {
     use super::ViewCache;
     use std::{collections::HashMap, rc::Rc};
+
+    #[test]
+    fn a_partially_clipped_device_stays_visible_inside_the_panel() {
+        use gpui::{Bounds, point, px, size};
+        let screen = Bounds::new(point(px(10.), px(100.)), size(px(360.), px(600.)));
+        let panel = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(500.)));
+        assert_eq!(super::stream_bounds(screen, panel), Some(Bounds::new(point(px(10.), px(100.)), size(px(360.), px(400.)))));
+        assert_eq!(super::stream_bounds(screen, screen), Some(screen));
+        let hidden = Bounds::new(point(px(0.), px(0.)), size(px(400.), px(50.)));
+        assert_eq!(super::stream_bounds(screen, hidden), None);
+        let fraction = Bounds::new(screen.origin, size(px(359.75), px(600.)));
+        assert_eq!(super::stream_bounds(screen, fraction), Some(fraction));
+    }
 
     #[test]
     fn tab_hide_retains_view_and_reconnect_or_close_releases_only_its_owner() {
@@ -177,6 +197,8 @@ mod macos {
                 let origin = url.clone();
                 let builder = WebViewBuilder::new().with_url(url).with_incognito(true).with_focused(false)
                     .with_visible(false)
+                    // Agents keep using this session while its panel/window is hidden.
+                    .with_background_throttling(wry::BackgroundThrottlingPolicy::Disabled)
                     .with_accept_first_mouse(true)
                     .with_navigation_handler(move |url| url.starts_with(&origin))
                     .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny);
@@ -239,8 +261,8 @@ mod macos {
                 div().p_3().child("Connecting live device stream…").into_any_element()
             } else {
                 canvas(|bounds, window, _| (bounds, window.content_mask().bounds), move |_, (bounds, mask), window, cx| {
-                    let visible = bounds.intersect(&mask) == bounds && bounds.size.width > px(0.) && bounds.size.height > px(0.);
-                    let _ = this.update(cx, |view, _| view.place(bounds, visible, window));
+                    let clipped = super::stream_bounds(bounds, mask);
+                    let _ = this.update(cx, |view, _| view.place(clipped.unwrap_or(bounds), clipped.is_some(), window));
                 }).size_full().into_any_element()
             })
         }

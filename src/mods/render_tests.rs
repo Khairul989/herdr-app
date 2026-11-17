@@ -500,14 +500,17 @@ fn devices_show_preview_first_and_keep_setup_behind_controls(cx: &mut TestAppCon
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let tree = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), None).unwrap();
-    for label in ["Devices", "Controls", "Reconnect", "Close app / release"] {
+    for label in ["Devices", "Setup & input", "Restart video", "Disconnect"] {
         assert!(tree.contains(label), "missing {label}: {tree}");
     }
-    assert!(!tree.contains("Find devices"), "setup should start collapsed: {tree}");
+    assert!(!tree.contains("Refresh device list"), "setup should start collapsed: {tree}");
     let controls = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.showControls = true;")).unwrap();
-    for label in ["Install tools", "Find devices", "Open app", "Read UI"] {
+    for label in ["Install / repair tools", "Refresh device list", "Connect device", "Inspect screen text", "App to open (optional)", "No devices listed"] {
         assert!(controls.contains(label), "missing manual control {label}: {controls}");
     }
+    let phone = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.tools.device = {platform: 'ios', kind: 'device', id: 'phone'}; this.tools.opened = true;")).unwrap();
+    assert!(phone.contains("Refresh capture"));
+    assert!(!phone.contains("Restart video"), "a physical iPhone has no live stream: {phone}");
 }
 
 /// A mod's localStorage write lands on the executor; one that lands after the

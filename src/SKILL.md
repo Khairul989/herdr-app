@@ -159,7 +159,9 @@ those files or the generated guide. The app rewrites them on start.
   `status` reads its connection; `run current snapshot -i` and `run current click @e1` reuse it.
   Coordinate input; `close current` disconnects it explicitly. A different active device/app
   is never silently replaced. Explicit `--pane PANE_ID` retains legacy sibling-pane support.
-  Switching workspaces or hiding the panel retains its browser/stream; Reconnect replaces it.
+  Switching workspaces or hiding the panel retains its browser/stream; Restart video replaces it.
+  Setup & input explains device selection and manual actions; Inspect screen text reads automation refs.
+  Stopped Android emulators boot in the background; running ones keep their current window mode.
   Use `key enter|backspace|tab`, `snapshot -i --compact`, and `click @e1 --snapshot --compact`
   for compact testing loops. `find TEXT` is read-only; `find TEXT click` is an explicit tap.
   Native video is absent from `herdr-app shot`; use device snapshots/captures for assertions.

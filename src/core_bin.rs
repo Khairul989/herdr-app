@@ -144,7 +144,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut child = Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(shell_path_args())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -164,7 +164,13 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let mut out = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out.into())
+    // Interactive profiles can print startup banners; only read our delimited value.
+    out.split('\0').nth(1).map(Into::into)
+}
+
+fn shell_path_args() -> [&'static str; 2] {
+    // macOS version managers commonly initialise in .zshrc, as for terminal tabs.
+    [if cfg!(target_os = "macos") { "-lic" } else { "-lc" }, "printf '\\0%s\\0' \"$PATH\""]
 }
 
 /// Installs the core's latest release with its own installer (into
@@ -290,6 +296,28 @@ fn ensure_core_bundle(version: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dock_path_includes_interactive_version_managers_without_profile_output() {
+        let dir = std::env::temp_dir().join(format!("herdr-path-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".zshrc"), "echo startup-banner\nexport PATH=\"$HOME/version-manager/bin:$PATH\"\n").unwrap();
+        let run = |args: [&str; 2]| Command::new("/bin/zsh").env_clear()
+            .env("HOME", &dir).env("ZDOTDIR", &dir).env("PATH", "/usr/bin:/bin")
+            .args(args).output().unwrap();
+        let control = run(["-lc", shell_path_args()[1]]);
+        assert!(control.status.success());
+        assert!(!String::from_utf8_lossy(&control.stdout).contains("version-manager"));
+        let output = run(shell_path_args());
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("startup-banner"));
+        let path = stdout.split('\0').nth(1).unwrap();
+        assert!(path.starts_with(&format!("{}/version-manager/bin:", dir.display())));
+        assert!(!path.contains("startup-banner"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
