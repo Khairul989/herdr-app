@@ -1033,6 +1033,26 @@ configured in `.zshrc`. Native video fits within the visible panel when its layo
 On macOS 14+, the live webview disables background suspension so agent use can continue
 while the panel is hidden. Physical iPhones use **Refresh capture** to take a fresh screenshot.
 
+Physical iPhones and iPads also have experimental live video on Apple Silicon Macs with
+Xcode 27+, Developer Mode and a trusted USB connection (or Finder Wi-Fi pairing).
+Choose **Start live video** to build a separate, pinned native capture adapter using Rust 1.95.0
+(`rustup` is required). The archive and Expo patch are SHA-256 checked; native dependency
+licenses and the build manifest are kept with the addon under
+`device-tools/physical-ios/a03b9e9-1/`. This does not replace the simulator/Android hub.
+**Start live video** retries setup if it failed; **Restart video** replaces only the preview.
+Video setup is separate from agent commands; a failure leaves the app session usable.
+**Refresh capture** switches to a screenshot; **Show live video** returns to the viewer.
+
+The physical screen uses HEVC WebCodecs in Herdr's embedded viewer. Tap and drag there;
+typing and UI inspection continue through the signed XCTest runner and existing agent helper.
+The native preview is bound to the exact phone chosen for the session. Closing or hiding
+the view never closes the agent app session or shuts down the phone. Capture cleanup only
+stops streams owned by that preview. If an idle preview expires, use **Reconnect video** in the viewer; the agent
+session is retained. Avoid simultaneous manual and agent input.
+This optional adapter is based on unmerged Expo Device Hub PR #507 at
+`a03b9e9266be5589587e384c8bf6659e6fa496ca`; it uses experimental private CoreDevice services.
+It does not add physical-iPhone keyboard injection, simulator-only tools or screen recording.
+
 Real iPhones need pairing/trust, Developer Mode, and a signed XCTest runner. Save the signing
 team once; the panel and the helper pass it to every device-tools process, including the
 backend daemon that builds the runner:
@@ -1052,8 +1072,7 @@ backend's verified `daemon stop`) a daemon that started without the saved signin
 live session it refuses and names the session instead.
 See <https://oss.callstack.com/agent-device/docs/installation#ios-physical-device-prerequisites>.
 Discovery does not prove that signing, captures, or input work on a physical phone.
-Physical iPhones use explicitly labelled captures and agent controls; live iPhone mirroring
-is not supported by this viewer.
+Physical iPhones retain labelled captures and agent controls alongside the optional live viewer.
 
 **Agent commands** shows helper instructions. Coordinate manual and agent input; do not
 operate a session concurrently. Agent panel connections and preview handoffs live in

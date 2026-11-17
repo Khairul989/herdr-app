@@ -162,6 +162,11 @@ those files or the generated guide. The app rewrites them on start.
   Switching workspaces or hiding the panel retains its browser/stream; Restart video replaces it.
   Setup & input explains device selection and manual actions; Inspect screen text reads automation refs.
   Stopped Android emulators boot in the background; running ones keep their current window mode.
+  Real iPhones/iPads have experimental HEVC video on Apple Silicon with Xcode 27+, trusted
+  pairing and Developer Mode. Start live video builds the pinned optional adapter with Rust 1.95.0.
+  Start live video also retries setup; Refresh capture remains available. Tap/drag the live screen;
+  text and accessibility inspection retain the existing signed XCTest path. Preview cleanup
+  releases only its own capture, never the phone or the agent's app session.
   Use `key enter|backspace|tab`, `snapshot -i --compact`, and `click @e1 --snapshot --compact`
   for compact testing loops. `find TEXT` is read-only; `find TEXT click` is an explicit tap.
   Native video is absent from `herdr-app shot`; use device snapshots/captures for assertions.

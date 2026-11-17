@@ -5,6 +5,8 @@ import * as fs from "fs/promises";
 import { DeviceSession, VERSION } from "./device.js";
 import { connectGlobal } from "./global.js";
 
+const deviceKey = device => device ? `${device.platform}:${device.kind}:${device.id}` : "";
+
 export default class Devices extends View {
   init(_props, cx) {
     const p = props() ?? {};
@@ -27,6 +29,9 @@ export default class Devices extends View {
     this.globalDir = `${appHome()}/device-global`;
     this.width = 360;
     this.liveReady = false;
+    this.liveBusy = false;
+    this.liveError = "";
+    this.showCapture = false;
     this.liveRevision = 0;
     this.app = InputState.new({ value: p.app ?? localStorage.getItem("device-app") ?? "", placeholder: "App bundle ID or package (optional)" });
     this.target = InputState.new({ placeholder: '@ref, label="Button", or x y' });
@@ -130,6 +135,10 @@ export default class Devices extends View {
     cx.spawn(async (cx) => {
       try {
         await this.publish(); await this.tools.exclusive(work);
+        const key = deviceKey(this.tools.device);
+        if (key !== this.liveDevice) {
+          this.liveDevice = key; this.liveReady = false; this.liveError = ""; this.showCapture = false;
+        }
         if (this.tools.opened && !(this.tools.device.platform === "ios" && this.tools.device.kind === "device")) {
           await this.tools.ensureLiveTools(); this.liveReady = true;
         }
@@ -140,6 +149,24 @@ export default class Devices extends View {
       localStorage.setItem("device-app", this.app.value());
       try { await this.publish(); } catch (error) { this.error = String(error); }
       cx.notify();
+    });
+  }
+
+  startPhysicalVideo(cx) {
+    if (this.liveBusy) return;
+    this.showCapture = false;
+    const key = deviceKey(this.tools.device);
+    if (this.liveReady && this.liveDevice === key) { this.liveRevision++; cx.notify(); return; }
+    this.liveBusy = true; this.liveError = "";
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        await this.tools.ensureLiveTools();
+        if (deviceKey(this.tools.device) === key) { this.liveDevice = key; this.liveReady = true; }
+      } catch (error) {
+        // Optional video setup must never poison the shared agent app session.
+        if (deviceKey(this.tools.device) === key) this.liveError = String(error);
+      } finally { this.liveBusy = false; cx.notify(); }
     });
   }
 
@@ -165,7 +192,7 @@ export default class Devices extends View {
       .when(this.devices.length === 0, el => el.child(div().text_color(t.muted).child("No devices listed. Refresh after connecting a phone or creating a simulator in Xcode / Android Studio.")))
       .child(v_flex().id("device-list").max_h(140).flex_none().gap(4).overflow_y_scrollbar().children(this.devices.map((d, i) =>
         this.button(`device-${i}`, `${tools.device?.id === d.id && tools.device?.platform === d.platform ? "Selected: " : ""}${d.name} · ${d.platform} ${d.osVersion ?? ""} · ${d.kind === "device" ? "physical" : d.kind} · ${d.booted === false ? "stopped · " : ""}${d.id.slice(-8)}`, !active, cx => {
-          tools.select(d); this.details = ""; cx.notify();
+          tools.select(d); this.liveReady = false; this.liveError = ""; this.showCapture = false; this.details = ""; cx.notify();
         }))))
       .child(div().child("2. App to open (optional)"))
       .child(this.input(this.app))
@@ -190,31 +217,36 @@ export default class Devices extends View {
 
   render() {
     const t = theme(), tools = this.tools, active = tools.opened, frame = tools.frame;
-    const captureOnly = tools.device?.platform === "ios" && tools.device?.kind === "device";
+    const liveReady = this.liveReady && this.liveDevice === deviceKey(tools.device);
+    const physical = tools.device?.platform === "ios" && tools.device?.kind === "device";
+    const captureOnly = physical && (!liveReady || this.showCapture);
     const width = frame ? Math.min(Math.max(80, this.width - 24), 360, Math.max(200, (this.height ?? 850) - 160) * frame.width / frame.height) : 0;
     return v_flex().id("devices").size_full().bg(t.surface).text_color(t.foreground).text_size(12)
       .on_size_change((s, cx) => { if (this.width !== s.width || this.height !== s.height) { this.width = s.width; this.height = s.height; cx.notify(); } })
       .p(12).gap(8)
       .child(div().text_size(15).font_semibold().child(tools.device?.name ?? "Devices"))
-      .child(h_flex().gap(6)
+      .child(h_flex().gap(6).flex_wrap()
         .child(this.button("device-controls", this.showControls ? "Hide setup" : "Setup & input", true, cx => { this.showControls = !this.showControls; cx.notify(); }))
-        .child(this.button("device-capture", captureOnly ? "Refresh capture" : "Restart video", active, cx => {
-          if (captureOnly) this.task(cx, "Capturing screen…", () => tools.capture());
+        .child(this.button("device-capture", physical ? "Refresh capture" : "Restart video", active, cx => {
+          if (physical) { this.showCapture = true; this.task(cx, "Capturing screen…", () => tools.capture()); }
           else { this.liveRevision++; cx.notify(); }
         }))
+        .when(physical, el => el.child(this.button("device-live-start", liveReady ? this.showCapture ? "Show live video" : "Restart video" : "Start live video", active && !this.liveBusy, cx => this.startPhysicalVideo(cx))))
         .child(this.button("device-close", "Disconnect", active, cx => this.task(cx, "Closing app session…", async () => { await tools.release(); this.details = ""; if (this.global) this.showControls = true; }))))
-      .when(active, el => el.child(div().text_color(t.muted).child(captureOnly
-        ? "Refresh capture takes a new screenshot. Disconnect ends the session and closes its app."
+      .when(active, el => el.child(div().text_color(t.muted).child(physical
+        ? "Experimental live iPhone video. Start live video to enable it; tap or drag the screen. Use Setup & input for text. Refresh capture switches to a screenshot."
         : "Black or frozen screen? Restart video keeps your app session. Disconnect ends the session and closes its app; the emulator stays running.")))
       .when(Boolean(this.status), el => el.child(div().text_color(t.muted).child(this.status)))
+      .when(this.liveBusy, el => el.child(div().text_color(t.muted).child("Preparing real-iPhone video tools (first use builds the native adapter)…")))
+      .when(Boolean(this.liveError), el => el.child(div().text_color(t.blocked).child(this.liveError)))
       .when(Boolean(this.error), el => el.child(div().text_color(t.blocked).child(this.error)))
-      .when(Boolean(tools.device) && !(tools.device.platform === "ios" && tools.device.kind === "device"), el => el.child(
-        DeviceView.new(`live-${tools.device.id}-${this.liveRevision}`, { session: tools.session, active: active && this.liveReady, node: tools.node, script: `${appHome()}/mods/devices/live.mjs`, toolsRoot: `${appHome()}/device-tools`, platform: tools.device.platform, device: tools.device.id })
-          .when(active && this.liveReady, el => el.size_full().flex_1().min_h(180))
-          .when(!active || !this.liveReady, el => el.h(0).min_h(0).flex_none())))
-      .when(Boolean(frame) && tools.device?.platform === "ios" && tools.device?.kind === "device", el => el.child(v_flex().items_center().gap(6)
+      .when(Boolean(tools.device), el => el.child(
+        DeviceView.new(`live-${tools.device.id}-${this.liveRevision}`, { session: tools.session, active: active && liveReady && !captureOnly, node: tools.node, script: `${appHome()}/mods/devices/${physical ? "physical.mjs" : "live.mjs"}`, toolsRoot: `${appHome()}/device-tools`, platform: tools.device.platform, device: tools.device.id })
+          .when(active && liveReady && !captureOnly, el => el.size_full().flex_1().min_h(180))
+          .when(!active || !liveReady || captureOnly, el => el.h(0).min_h(0).flex_none())))
+      .when(Boolean(frame) && captureOnly, el => el.child(v_flex().items_center().gap(6)
         .child(image(frame.path).w(width).h(width * frame.height / frame.width).flex_none())
-        .child(div().text_color(t.dim).child(`Physical iPhone capture at ${frame.capturedAt} · live mirroring unavailable`))))
+        .child(div().text_color(t.dim).child(`Physical iPhone capture at ${frame.capturedAt} · screenshot`))))
       .when(!frame && !this.busy, el => el.child(v_flex().py(32).gap(8)
         .child(div().child(this.global ? "Connect a device here. Its connection is shared across all workspaces." : "Your agent opens a device here and tests the app beside its terminal."))
         .child(div().text_color(t.muted).child("Choose a device in Setup & input, then connect. You and your agent share its live screen."))))
