@@ -1,11 +1,11 @@
 // Agent entry point: connect through Herdr's global Devices panel, then use its shared session.
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
-import { chooseDevice, mobileDevices, result, target, VERSION } from "./device.js";
+import { chooseDevice, mobileDevices, readSigning, result, signingPath, signingVars, target, VERSION } from "./device.js";
 import { runOptions, annotateSnapshot, compactSnapshot, sendKey, shareSheet } from "./interaction.mjs";
 import { ensureKeyboardPatch } from "./backend.mjs";
 
@@ -21,7 +21,8 @@ export function sessionDir(session) {
 }
 
 export async function execute(command, args) {
-  const env = { ...process.env, PATH: `${resolve(process.execPath, "..")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH || ""}` };
+  // Saved iPhone signing reaches any backend daemon this call starts; it wins, as in the panel.
+  const env = { ...process.env, ...await readSigning(fs, root), PATH: `${resolve(process.execPath, "..")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH || ""}` };
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "", stderr = "";
@@ -67,6 +68,7 @@ export const HELP = `Herdr device testing (agent.mjs)
   status SESSION
   status (global connection); use current in place of SESSION for shared input
   close SESSION
+  ios-register --device UDID [--team TEAM_ID --bundle RUNNER_BUNDLE_ID]
   --help | -h | help
 
 Commands: ${ACTIONS.join(", ")}
@@ -142,6 +144,7 @@ async function openPanel(args) {
   if (options.pane && !options.app) throw new Error("Legacy --pane opening requires --app.");
   const device = chooseDevice(await devices(), options.device, options.platform);
   if (!options.pane) return openGlobal(device, options.app || "");
+  if (device.platform === "ios" && device.kind === "device") await refreshSigningDaemon();
   const listed = await execute(app, ["ls"]);
   if (listed.code) throw new Error(listed.stderr || listed.stdout);
   const list = JSON.parse(listed.stdout);
@@ -170,7 +173,7 @@ async function openPanel(args) {
   throw new Error(`Panel startup timed out. Inspect the Devices pane. Session: ${session}`);
 }
 
-export async function openGlobal(device, appId, { io = fs, command = appCommand, pause = delay, timeout = 600000 } = {}) {
+export async function openGlobal(device, appId, { io = fs, command = appCommand, pause = delay, timeout = 600000, refresh = refreshSigningDaemon } = {}) {
   const directory = join(root, "device-global");
   await io.mkdir(directory, { recursive: true });
   const lock = await io.open(join(directory, "open.lock"), "wx").catch(error => {
@@ -189,6 +192,8 @@ export async function openGlobal(device, appId, { io = fs, command = appCommand,
         throw error;
       });
     }
+    // Under the open lock, so no other shared open can race the restart.
+    if (device.platform === "ios" && device.kind === "device") await refresh();
     const id = randomUUID();
     await io.writeFile(join(directory, "request-next.json"), JSON.stringify({ id, node: process.execPath, device: device.id, platform: device.platform, app: appId }));
     await io.rename(join(directory, "request-next.json"), join(directory, "request.json"));
@@ -207,6 +212,72 @@ export async function openGlobal(device, appId, { io = fs, command = appCommand,
     if (sessionLock) { await sessionLock.close(); await io.unlink(sessionLockPath); }
     await lock.close(); await io.unlink(join(directory, "open.lock"));
   }
+}
+
+// The PID of a running backend daemon that lacks the saved signing settings, else null.
+export async function staleSigningDaemon(vars, { io = fs, run = execute } = {}) {
+  if (!Object.keys(vars).length) return null;
+  let pid;
+  try { pid = JSON.parse(await io.readFile(join(state, "daemon.json"), "utf8")).pid; } catch { return null; }
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const ps = await run("ps", ["eww", "-o", "command=", "-p", String(pid)]);
+  if (ps.code !== 0 || !ps.stdout.trim()) return null;
+  const text = ` ${ps.stdout.trim()} `;
+  return Object.entries(vars).every(([name, value]) => text.includes(` ${name}=${value} `)) ? null : pid;
+}
+
+// Restart a daemon started without the saved signing (e.g. by the panel before the
+// settings existed). Never while any session is live: that would end another agent's run.
+// The backend's own stop verifies the daemon's PID and start time before stopping it.
+export async function refreshSigningDaemon({ io = fs, run = execute } = {}) {
+  const pid = await staleSigningDaemon(await readSigning(io, root), { io, run });
+  if (!pid) return { restarted: false };
+  const listed = result(await run(process.execPath, [cli, "session", "list", "--state-dir", state, "--json"]));
+  const live = (listed.sessions ?? []).map(s => s.name);
+  if (live.length) throw new Error(`The device backend (pid ${pid}) started without the saved iOS signing, and session(s) ${live.join(", ")} are still running. Close them, then retry.`);
+  result(await run(process.execPath, [cli, "daemon", "stop", "--state-dir", state, "--json"]));
+  return { restarted: true, pid };
+}
+
+// agent-device builds its runner for a generic iOS destination, which never adds a
+// new phone to the signing team. One build aimed at the phone registers it; the
+// backend's cached runner builds are then dropped so it re-signs with that profile.
+export async function registerIphone(args, { io = fs, run = execute, home = homedir(), scratch = tmpdir() } = {}) {
+  const options = {};
+  for (let i = 0; i < args.length; i += 2) {
+    if (!["--device", "--team", "--bundle"].includes(args[i]) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error("ios-register --device <udid> [--team <team-id> --bundle <runner-bundle-id>]");
+    options[args[i].slice(2)] = args[i + 1];
+  }
+  if (!options.device) throw new Error("ios-register requires --device. Run devices to list exact IDs.");
+  if (options.team || options.bundle) {
+    let saved = {};
+    try { saved = JSON.parse(await io.readFile(signingPath(root), "utf8")); } catch {}
+    const config = { ...saved, ...(options.team && { teamId: options.team }), ...(options.bundle && { bundleId: options.bundle }) };
+    const checked = signingVars(config);
+    if (!checked.AGENT_DEVICE_IOS_TEAM_ID || !checked.AGENT_DEVICE_IOS_BUNDLE_ID) throw new Error("Pass both --team and --bundle the first time.");
+    await io.mkdir(join(root, "device-tools"), { recursive: true });
+    await io.writeFile(`${signingPath(root)}.next`, JSON.stringify(config, null, 2) + "\n");
+    await io.rename(`${signingPath(root)}.next`, signingPath(root));
+  }
+  const vars = await readSigning(io, root);
+  const team = vars.AGENT_DEVICE_IOS_TEAM_ID, bundle = vars.AGENT_DEVICE_IOS_BUNDLE_ID;
+  if (!team || !bundle) throw new Error(`Save teamId and bundleId first: ios-register --device ${options.device} --team <team-id> --bundle <runner-bundle-id> (writes ${signingPath(root)}).`);
+  const listed = await run("xcrun", ["devicectl", "list", "devices"]);
+  if (listed.code !== 0 || !listed.stdout.includes(options.device)) throw new Error(`Xcode does not list ${options.device}. Connect it over USB, trust this Mac, and enable Developer Mode.`);
+  const project = join(root, "device-tools/node_modules/agent-device/dist/apple/runner/AgentDeviceRunner/AgentDeviceRunner.xcodeproj");
+  const derived = join(scratch, `herdr-ios-register-${randomUUID()}`);
+  const build = await run("xcodebuild", ["build-for-testing", "-project", project, "-scheme", "AgentDeviceRunner", "-destination", `id=${options.device}`, "-derivedDataPath", derived,
+    "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", "CODE_SIGN_STYLE=Automatic", `DEVELOPMENT_TEAM=${team}`,
+    `AGENT_DEVICE_IOS_RUNNER_APP_BUNDLE_ID=${bundle}`, `AGENT_DEVICE_IOS_RUNNER_TEST_BUNDLE_ID=${bundle}.uitests`]);
+  await io.rm(derived, { recursive: true, force: true });
+  if (build.code !== 0 || !build.stdout.includes("TEST BUILD SUCCEEDED")) {
+    const errors = [...new Set(`${build.stdout}\n${build.stderr}`.split("\n").filter(line => line.includes("error:")).map(line => line.trim()))].slice(0, 8);
+    throw new Error(["Runner build for the phone failed.", ...errors].join("\n"));
+  }
+  const caches = join(home, ".agent-device/apple-runner/derived/ios-device");
+  let cleared = 0;
+  for (const name of await io.readdir(caches).catch(() => [])) if (name.startsWith("cache-")) { await io.rm(join(caches, name), { recursive: true, force: true }); cleared++; }
+  return { registered: true, device: options.device, team, bundleId: bundle, clearedCaches: cleared, next: "Close and open the device again so the backend picks up the new runner. If the phone reports an untrusted developer, trust it in Settings > General > VPN & Device Management." };
 }
 
 export async function drive(session, args, close = false, { io = fs, run = execute, prepare = ensureKeyboardPatch, keyInput = sendKey } = {}) {
@@ -313,11 +384,12 @@ export async function main(args) {
     args = [args[0], current.session, ...args.slice(2)];
   }
   if (args[0] === "devices") return { devices: await devices() };
+  if (args[0] === "ios-register") return registerIphone(args.slice(1));
   if (args[0] === "open") return openPanel(args.slice(1));
   if (args[0] === "run" && args[1]) return drive(args[1], args.slice(2));
   if (args[0] === "close" && args[1]) return drive(args[1], [], true);
   if (args[0] === "status" && args[1]) return readStatus(args[1]);
-  throw new Error("Usage: agent.mjs show | devices | open --device ID [--app APP] | run current|SESSION <command> [args] | status [SESSION] | close current|SESSION. Run --help for details.");
+  throw new Error("Usage: agent.mjs show | devices | ios-register --device UDID | open --device ID [--app APP] | run current|SESSION <command> [args] | status [SESSION] | close current|SESSION. Run --help for details.");
 }
 
 const entry = process.argv[1] ? await fs.realpath(process.argv[1]).catch(() => null) : null;

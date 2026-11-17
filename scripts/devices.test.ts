@@ -1,6 +1,9 @@
 import { test, expect } from "bun:test";
-import { DeviceSession, VERSION, result, mobileDevices, pngSize, target, chooseDevice } from "../defaults/mods/devices/device.js";
-import { actionArgs, ownerPane, sessionDir, splitPanel, appCommand } from "../defaults/mods/devices/agent.mjs";
+import { DeviceSession, VERSION, result, mobileDevices, pngSize, target, chooseDevice, signingVars, withSigning } from "../defaults/mods/devices/device.js";
+import { actionArgs, ownerPane, sessionDir, splitPanel, appCommand, staleSigningDaemon, refreshSigningDaemon, registerIphone, openGlobal } from "../defaults/mods/devices/agent.mjs";
+import { mkdtemp, writeFile as writeText, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { connectGlobal } from "../defaults/mods/devices/global.js";
 
 const ios = { id: "phone with spaces", name: "iPhone", platform: "ios", target: "mobile", kind: "device" };
@@ -17,10 +20,16 @@ test("global device-only connection works inside the real session's exclusive op
   expect(h.tools.pending).toBe(false);
 });
 
-function harness() {
+function harness(signing?: string) {
   const calls: any[] = [], removed: string[] = [], written: any[] = [];
+  // No saved iPhone signing unless a test supplies the file's text.
+  const readFile = async (path: string) => {
+    if (!path.endsWith("ios-signing.json")) return png;
+    if (signing === undefined) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+    return signing;
+  };
   let respond: (args: string[]) => any = args => args.includes("--version") ? { code: 0, stdout: VERSION, stderr: "" } : ok(args.includes("devices") ? { devices: [ios, android] } : {});
-  const tools = new DeviceSession({ root: "/app home", session: "panel-a", exec: async (bin: string, args: string[], options: any) => { calls.push({ bin, args, options }); return respond(args); }, fs: { mkdir: async () => {}, readFile: async () => png, writeFile: async (path: string, bytes: Uint8Array) => { written.push({ path, bytes }); }, unlink: async (path: string) => { removed.push(path); } } });
+  const tools = new DeviceSession({ root: "/app home", session: "panel-a", exec: async (bin: string, args: string[], options: any) => { calls.push({ bin, args, options }); return respond(args); }, fs: { mkdir: async () => {}, readFile, writeFile: async (path: string, bytes: Uint8Array) => { written.push({ path, bytes }); }, unlink: async (path: string) => { removed.push(path); } } });
   return { tools, calls, removed, written, respond: (fn: typeof respond) => { respond = fn; } };
 }
 
@@ -287,4 +296,133 @@ test('the real CLI nonzero JSON error shape permits only the missing-wrapper fal
     expect(count).toBe(1);
   }
   await expect(appCommand('pane.split',{},async ()=>({code:1,stdout:'',stderr:'executable failed'}))).rejects.toThrow('executable failed');
+});
+
+const signing = JSON.stringify({ teamId: "ABCDE12345", bundleId: "com.example.agentdevice.runner" });
+
+test("without saved iPhone signing every backend call keeps today's exact argv", async () => {
+  const h = harness();
+  await h.tools.list();
+  expect(h.calls.map(c => c.bin)).toEqual(["node", "node"]);
+  expect(h.calls[1].args).toEqual(["/app home/device-tools/node_modules/agent-device/bin/agent-device.mjs", "devices", "--state-dir", "/app home/device-tools/state", "--json"]);
+});
+
+test("saved signing reaches the backend daemon through env, without a shell", async () => {
+  const h = harness(signing);
+  await h.tools.list();
+  const call = h.calls[1];
+  expect(call.bin).toBe("/usr/bin/env");
+  expect(call.args.slice(0, 4)).toEqual(["AGENT_DEVICE_IOS_TEAM_ID=ABCDE12345", "AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner", "node", "/app home/device-tools/node_modules/agent-device/bin/agent-device.mjs"]);
+  expect(call.args).toContain("devices");
+});
+
+test("invalid signing settings fail loudly instead of signing with the wrong team", async () => {
+  await expect(harness("{not json").tools.list()).rejects.toThrow("not valid JSON");
+  expect(() => signingVars({ teamId: "abc" })).toThrow("10-character");
+  expect(() => signingVars({ bundleId: "runner" })).toThrow("reverse-DNS");
+  expect(() => signingVars({ teamId: "ABCDE12345\nX" })).toThrow("single-line");
+  expect(signingVars({ teamId: "ABCDE12345", signingIdentity: "Apple Development: A (B)" })).toEqual({ AGENT_DEVICE_IOS_TEAM_ID: "ABCDE12345", AGENT_DEVICE_IOS_SIGNING_IDENTITY: "Apple Development: A (B)" });
+});
+
+test("the helper's own spawns carry the saved signing, which wins over exported variables", async () => {
+  const home = await mkdtemp(join(tmpdir(), "herdr-signing-"));
+  try {
+    await Bun.write(join(home, "device-tools/ios-signing.json"), JSON.stringify({ teamId: "ABCDE12345", bundleId: "com.example.agentdevice.runner" }));
+    const script = `const { execute } = await import(${JSON.stringify(new URL("../defaults/mods/devices/agent.mjs", import.meta.url).href)}); console.log((await execute("/usr/bin/env", [])).stdout);`;
+    const child = Bun.spawnSync([process.execPath, "-e", script], { env: { ...process.env, HERDR_APP_HOME: home, AGENT_DEVICE_IOS_TEAM_ID: "ZZZZZ99999" } });
+    const env = child.stdout.toString().split("\n");
+    expect(env).toContain("AGENT_DEVICE_IOS_TEAM_ID=ABCDE12345");
+    expect(env).toContain("AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner");
+  } finally { await rm(home, { recursive: true, force: true }); }
+  expect(withSigning("node", ["x"], { AGENT_DEVICE_IOS_TEAM_ID: "ABCDE12345" })).toEqual(["/usr/bin/env", ["AGENT_DEVICE_IOS_TEAM_ID=ABCDE12345", "node", "x"]]);
+});
+
+test("backend signing failures carry the registration hint", () => {
+  for (const message of ['error: No Account for Team "ABCDE12345"', "Failed to install embedded profile: 0xe8008012", "its provisioning profile does not cover it"])
+    expect(() => result({ code: 1, stdout: JSON.stringify({ success: false, error: { message } }), stderr: "" })).toThrow("ios-register --device UDID, then close and open the device again");
+  expect(() => result({ code: 1, stdout: JSON.stringify({ success: false, error: { message: "boom" } }), stderr: "" })).toThrow(/^boom$/);
+});
+
+const daemonIo = (pid: unknown) => ({ readFile: async (path: string) => {
+  if (path.endsWith("ios-signing.json")) return signing;
+  if (path.endsWith("daemon.json")) return JSON.stringify({ pid });
+  throw Object.assign(new Error("missing"), { code: "ENOENT" });
+} });
+const vars = { AGENT_DEVICE_IOS_TEAM_ID: "ABCDE12345", AGENT_DEVICE_IOS_BUNDLE_ID: "com.example.agentdevice.runner" };
+
+test("a daemon is stale only when it lacks a saved signing variable", async () => {
+  const ps = (stdout: string, code = 0) => async () => ({ code, stdout, stderr: "" });
+  const good = "node daemon.js HOME=/u AGENT_DEVICE_IOS_TEAM_ID=ABCDE12345 AGENT_DEVICE_IOS_BUNDLE_ID=com.example.agentdevice.runner PATH=/bin\n";
+  expect(await staleSigningDaemon(vars, { io: daemonIo(42), run: ps(good) })).toBeNull();
+  expect(await staleSigningDaemon(vars, { io: daemonIo(42), run: ps("node daemon.js HOME=/u PATH=/bin\n") })).toBe(42);
+  // A prefix of a longer team ID is not a match.
+  expect(await staleSigningDaemon(vars, { io: daemonIo(42), run: ps(good.replace("ABCDE12345", "ABCDE123456")) })).toBe(42);
+  expect(await staleSigningDaemon(vars, { io: daemonIo(42), run: ps("", 1) })).toBeNull();
+  expect(await staleSigningDaemon({}, { io: daemonIo(42), run: ps("") })).toBeNull();
+});
+
+test("a stale daemon is stopped through the backend's verified stop, only when no session is live", async () => {
+  const stops: string[][] = [];
+  const run = (sessions: string[]) => async (bin: string, args: string[]) => {
+    if (bin === "ps") return { code: 0, stdout: "node daemon.js HOME=/u\n", stderr: "" };
+    if (args.includes("daemon")) { stops.push(args.slice(1)); return ok({ stopped: true }); }
+    return ok({ sessions: sessions.map(name => ({ name })) });
+  };
+  await expect(refreshSigningDaemon({ io: daemonIo(42), run: run(["herdr-other"]) })).rejects.toThrow("herdr-other");
+  expect(stops).toEqual([]);
+  expect(await refreshSigningDaemon({ io: daemonIo(42), run: run([]) })).toEqual({ restarted: true, pid: 42 });
+  expect(stops).toEqual([["daemon", "stop", "--state-dir", expect.stringContaining("device-tools/state"), "--json"]]);
+});
+
+test("a shared physical-iPhone open checks the daemon under the open lock; simulators never do", async () => {
+  const order: string[] = [];
+  let request: any;
+  const io = { mkdir: async () => {}, open: async (path: string) => { order.push(`lock ${path.split("/").pop()}`); return { close: async () => {} }; },
+    writeFile: async (_path: string, text: string) => { request = JSON.parse(text); order.push("request"); }, rename: async () => {}, unlink: async () => {},
+    readFile: async () => JSON.stringify(request ? { requestId: request.id, status: "ready", opened: true, session: "s" } : {}) };
+  const refresh = async () => { order.push("refresh"); return { restarted: false }; };
+  await openGlobal({ id: "u", platform: "ios", kind: "device" }, "app", { io, command: async () => {}, refresh, timeout: 1000 });
+  expect(order).toEqual(["lock open.lock", "refresh", "request"]);
+  order.length = 0; request = undefined;
+  await openGlobal({ id: "s", platform: "ios", kind: "simulator" }, "app", { io, command: async () => {}, refresh, timeout: 1000 });
+  expect(order).not.toContain("refresh");
+});
+
+test("ios-register builds against the phone with device registration, then drops cached runners", async () => {
+  const calls: any[] = [], removed: string[] = [];
+  const io = { readFile: daemonIo(0).readFile, readdir: async () => ["cache-a", "other", "cache-b"], rm: async (path: string) => { removed.push(path); }, mkdir: async () => {}, writeFile: async () => {}, rename: async () => {} };
+  const run = async (bin: string, args: string[]) => {
+    calls.push({ bin, args });
+    if (bin === "xcrun") return { code: 0, stdout: "Phone  UDID-1 (UDID)  available (paired)", stderr: "" };
+    return { code: 0, stdout: "** TEST BUILD SUCCEEDED **", stderr: "" };
+  };
+  const out = await registerIphone(["--device", "UDID-1"], { io, run, home: "/u", scratch: "/tmp" });
+  const build = calls.find(c => c.bin === "xcodebuild").args;
+  expect(build).toContain("-allowProvisioningDeviceRegistration");
+  expect(build[build.indexOf("-destination") + 1]).toBe("id=UDID-1");
+  expect(build).toContain("DEVELOPMENT_TEAM=ABCDE12345");
+  expect(build).toContain("AGENT_DEVICE_IOS_RUNNER_TEST_BUNDLE_ID=com.example.agentdevice.runner.uitests");
+  expect(removed.filter(p => p.startsWith("/u/"))).toEqual(["/u/.agent-device/apple-runner/derived/ios-device/cache-a", "/u/.agent-device/apple-runner/derived/ios-device/cache-b"]);
+  expect(out.clearedCaches).toBe(2);
+  expect(out.next).toContain("Close and open the device again");
+});
+
+test("ios-register saves both signing values atomically, and refuses half a pair before writing", async () => {
+  const writes: any[] = [];
+  const io = { readFile: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); }, mkdir: async () => {}, writeFile: async (path: string, text: string) => { writes.push(["write", path, text]); }, rename: async (from: string, to: string) => { writes.push(["rename", from, to]); }, readdir: async () => [], rm: async () => {} };
+  await expect(registerIphone(["--device", "U", "--team", "ABCDE12345"], { io, run: async () => ({ code: 0, stdout: "", stderr: "" }), home: "/u", scratch: "/tmp" })).rejects.toThrow("both --team and --bundle");
+  expect(writes).toEqual([]);
+  await registerIphone(["--device", "U", "--team", "ABCDE12345", "--bundle", "com.example.agentdevice.runner"], { io, run: async () => ({ code: 1, stdout: "", stderr: "" }), home: "/u", scratch: "/tmp" }).catch(() => {});
+  expect(JSON.parse(writes[0][2])).toEqual({ teamId: "ABCDE12345", bundleId: "com.example.agentdevice.runner" });
+  expect(writes[1][0]).toBe("rename");
+  expect(writes[1][2]).toEndWith("device-tools/ios-signing.json");
+});
+
+test("ios-register refuses an unlisted phone or a failed build without touching caches", async () => {
+  const removed: string[] = [];
+  const io = { readFile: daemonIo(0).readFile, readdir: async () => ["cache-a"], rm: async (path: string) => { removed.push(path); } };
+  await expect(registerIphone(["--device", "UDID-9"], { io, run: async () => ({ code: 0, stdout: "other phones", stderr: "" }), home: "/u", scratch: "/tmp" })).rejects.toThrow("does not list UDID-9");
+  const failing = async (bin: string) => bin === "xcrun" ? { code: 0, stdout: "UDID-1", stderr: "" } : { code: 65, stdout: "x\nerror: No profiles for 'a' were found\n", stderr: "" };
+  await expect(registerIphone(["--device", "UDID-1"], { io, run: failing, home: "/u", scratch: "/tmp" })).rejects.toThrow("No profiles");
+  expect(removed.filter(p => p.startsWith("/u/"))).toEqual([]);
 });
