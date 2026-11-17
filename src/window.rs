@@ -3540,7 +3540,9 @@ impl AppWindow {
             }
             "app.check_updates" => crate::update::check_now(),
             "app.update_core" => {
-                if crate::update::core().ready.is_none() && crate::update::core().error.is_none() {
+                let core = crate::update::core();
+                // A source-built core is always worth asking: it merges upstream itself.
+                if core.ready.is_none() && core.error.is_none() && core.source.is_none() {
                     return self.fail("herdr-core is up to date");
                 }
                 crate::update::update_core();

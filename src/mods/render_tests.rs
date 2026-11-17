@@ -950,6 +950,23 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         }
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
+    // A source-built core: always offered, then each step, then what happened.
+    for (updating, progress, outcome, expect) in [
+        (false, None, None, "Built from master in /src/herdr-core"),
+        (true, Some("Building herdr-core (a few minutes)"), None, "Building herdr-core (a few minutes)"),
+        (false, None, Some("Merged 3 new upstream commits with your patches"), "Merged 3 new upstream commits"),
+    ] {
+        let mut p = props();
+        p["section"] = json!("updates");
+        let mut u = updates("current", "current");
+        u["core"]["source"] = json!("master in /src/herdr-core");
+        u["core"]["updating"] = json!(updating);
+        u["core"]["progress"] = json!(progress);
+        u["core"]["outcome"] = json!(outcome);
+        let tree = describe(cx, &staged, "frame/settings", true, p, u, None).unwrap();
+        assert!(tree.contains(expect), "{expect}: {tree}");
+        assert_eq!(tree.contains("st-core-update"), !updating, "the button shows unless it is running: {tree}");
+    }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
 }
 

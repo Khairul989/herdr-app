@@ -90,9 +90,25 @@ pub struct CoreInfo {
     pub ready: Option<String>,
     pub updating: bool,
     pub error: Option<String>,
+    /// Fork-only: "branch in dir" when herdr-core updates by rebuilding its
+    /// source checkout (`hc update` merges upstream, rebuilds and restarts).
+    pub source: Option<String>,
+    /// The step a source update is on, while it runs.
+    pub progress: Option<String>,
+    /// What the last source update did, in words.
+    pub outcome: Option<String>,
 }
 
-static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo { version: None, managed: None, ready: None, updating: false, error: None });
+static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo {
+    version: None,
+    managed: None,
+    ready: None,
+    updating: false,
+    error: None,
+    source: None,
+    progress: None,
+    outcome: None,
+});
 /// When the last check succeeded (unix seconds); a failed check clears it.
 static CHECKED: Mutex<Option<u64>> = Mutex::new(None);
 /// "Check now" wakes the checker early.
@@ -118,6 +134,33 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
     if c.managed.is_some() {
         c.error = None;
     }
+    let config = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()).map_or_else(|| crate::mods::home().join(".config"), PathBuf::from);
+    // Only a macOS custom build takes the source path (herdr-core `platform::custom_build`).
+    c.source = if cfg!(target_os = "macos") && c.managed.is_none() { source_checkout(&config) } else { None };
+}
+
+/// Fork-only: the checkout a source-built herdr-core updates from, as
+/// "branch in dir", when `herdr-core/source-update.env` (beside its
+/// local-signing.env) names one; herdr-core reads the same file.
+fn source_checkout(config: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config.join("herdr-core/source-update.env")).ok()?;
+    let value = |key: &str| {
+        text.lines().find_map(|l| l.trim().strip_prefix(key)?.strip_prefix('=').map(|v| v.trim_matches(['"', '\'']).to_owned()))
+    };
+    let dir = value("HC_SOURCE_DIR").filter(|d| !d.is_empty())?;
+    Some(format!("{} in {dir}", value("HC_SOURCE_BRANCH").unwrap_or_else(|| "?".into())))
+}
+
+/// A source update's result, in words, from `hc update --json`.
+fn source_outcome(reply: &serde_json::Value) -> Option<String> {
+    reply.get("source")?;
+    let now = reply["now"].as_str().unwrap_or("herdr-core");
+    let short = |key: &str| reply[key].as_str().map(|s| s.get(..7).unwrap_or(s).to_owned()).unwrap_or_default();
+    Some(match (reply["updated"].as_bool().unwrap_or(false), reply["merged"].as_u64().unwrap_or(0)) {
+        (false, _) => format!("Up to date: no new upstream commits ({now}, {}).", short("to")),
+        (true, 0) => format!("Rebuilt {} with your patches: now {now}.", short("to")),
+        (true, n) => format!("Merged {n} new upstream commit{} with your patches ({} → {}) and rebuilt: now {now}.", if n == 1 { "" } else { "s" }, short("from"), short("to")),
+    })
 }
 
 fn checks_app() -> Option<PathBuf> {
@@ -244,15 +287,20 @@ pub fn update_core() {
         }
         c.updating = true;
         c.error = None;
+        c.progress = c.source.is_some().then(|| "Starting".to_owned());
+        c.outcome = None;
     }
     std::thread::spawn(|| {
-        let result = crate::core_bin::update();
+        let result = crate::core_bin::update_reporting(None, |step| CORE.lock().unwrap().progress = Some(step.to_owned()));
         let mut c = CORE.lock().unwrap();
         c.updating = false;
+        c.progress = None;
         match result {
-            Ok(now) => {
+            Ok(reply) => {
+                let now = reply["now"].as_str().unwrap_or("the latest");
                 c.version = Some(now.trim_start_matches("hc ").to_owned());
                 c.ready = None;
+                c.outcome = source_outcome(&reply);
                 crate::telemetry::count("core_update_ok");
             }
             Err(e) => {
@@ -639,6 +687,33 @@ fn after_update_managed(status: Result<serde_json::Value, String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_built_core_is_found_from_its_update_config() {
+        let config = std::env::temp_dir().join(format!("herdr-source-config-{}", std::process::id()));
+        std::fs::create_dir_all(config.join("herdr-core")).unwrap();
+        assert_eq!(source_checkout(&config), None);
+        std::fs::write(config.join("herdr-core/source-update.env"), "HC_SOURCE_BRANCH=master\n").unwrap();
+        assert_eq!(source_checkout(&config), None, "no checkout named");
+        std::fs::write(config.join("herdr-core/source-update.env"), "HC_SOURCE_DIR='/src/herdr-core'\nHC_SOURCE_BRANCH=master\n").unwrap();
+        assert_eq!(source_checkout(&config).as_deref(), Some("master in /src/herdr-core"));
+        std::fs::remove_dir_all(config).unwrap();
+    }
+
+    #[test]
+    fn a_source_update_says_whether_anything_changed() {
+        let reply = |updated: bool, merged: u64| {
+            serde_json::json!({"now": "hc 0.1.22", "source": "/src", "updated": updated, "merged": merged, "from": "aaaaaaa111", "to": "bbbbbbb222"})
+        };
+        assert_eq!(source_outcome(&reply(false, 0)).unwrap(), "Up to date: no new upstream commits (hc 0.1.22, bbbbbbb).");
+        assert_eq!(source_outcome(&reply(true, 0)).unwrap(), "Rebuilt bbbbbbb with your patches: now hc 0.1.22.");
+        assert_eq!(
+            source_outcome(&reply(true, 3)).unwrap(),
+            "Merged 3 new upstream commits with your patches (aaaaaaa → bbbbbbb) and rebuilt: now hc 0.1.22."
+        );
+        assert!(source_outcome(&reply(true, 1)).unwrap().contains("1 new upstream commit with"));
+        assert_eq!(source_outcome(&serde_json::json!({"now": "hc 0.1.22", "updated": true})), None, "a release update has no source outcome");
+    }
 
     #[cfg(unix)]
     #[test]
