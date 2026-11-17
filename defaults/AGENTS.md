@@ -1007,14 +1007,20 @@ input commands still report an unreachable device.
 
 Build and install Flutter apps separately with `flutter run -d <device-id>`. The helper uses
 local simulators, emulators and connected phones; remote device hosts are not supported here.
-The pane's **Controls** section provides manual device/app selection, refs or coordinates,
+The pane's **Setup & input** section provides manual device/app selection, refs or coordinates,
 scrolling, Back and typing. Setup stays collapsed while the live screen takes priority.
+**Refresh device list** discovers targets; **Connect device** connects the selected target,
+optionally opening the installed app ID. **Inspect screen text** reads accessibility text
+and target refs for automation; it does not refresh video. **Show agent instructions**
+reveals the helper commands. **Disconnect** releases the session and closes its app,
+leaving the simulator/emulator running. Stopped Android emulators boot headlessly before
+the session opens; an already-running emulator keeps its current window mode.
 For manual use, split a pane with `pane.split {direction: "right", mod: "devices", props?}`.
 
-**Install tools** installs pinned `agent-device` 0.21.36 and `expo-device-hub` 0.23.1 under the app home's `device-tools/`,
+**Install / repair tools** installs pinned `agent-device` 0.21.36 and `expo-device-hub` 0.23.1 under the app home's `device-tools/`,
 using npm (Node >=22.12 required). No global install. iOS needs Xcode; Android needs the SDK.
 Opening a simulator also installs the pinned live viewer when missing. Native embedding currently
-requires macOS; iOS simulators and Android emulators are supported. **Reconnect** restarts only
+requires macOS; iOS simulators and Android emulators are supported. **Restart video** restarts only
 the pane's stream. `DeviceView.new(id, {node, script, toolsRoot, platform, device})` is the native
 leaf used by this mod; its server binds to loopback and exactly one selected device.
 Its optional `session` retains one stream across reconnect revisions; `active:false`
@@ -1022,6 +1028,10 @@ releases that stream while keeping the mod pane open.
 For custom tool paths, pass tab props, e.g. `{"node":"/absolute/path/to/node","npm":"/absolute/path/to/npm"}`.
 Optional `cli` points at an existing matching-version `agent-device.mjs` and disables installation.
 An npm executable with a Node shebang also needs Node on its inherited PATH.
+Dock launches load the interactive login shell PATH on macOS, including version managers
+configured in `.zshrc`. Native video fits within the visible panel when its layout is clipped.
+On macOS 14+, the live webview disables background suspension so agent use can continue
+while the panel is hidden. Physical iPhones use **Refresh capture** to take a fresh screenshot.
 
 Real iPhones need pairing/trust, Developer Mode, and a signed XCTest runner. Configure
 `AGENT_DEVICE_IOS_TEAM_ID` and, when needed, a unique `AGENT_DEVICE_IOS_BUNDLE_ID` in the app's

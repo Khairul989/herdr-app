@@ -28,7 +28,7 @@ export default class Devices extends View {
     this.width = 360;
     this.liveReady = false;
     this.liveRevision = 0;
-    this.app = InputState.new({ value: p.app ?? localStorage.getItem("device-app") ?? "", placeholder: this.global ? "App bundle ID or package (optional)" : "App bundle ID or Android package" });
+    this.app = InputState.new({ value: p.app ?? localStorage.getItem("device-app") ?? "", placeholder: "App bundle ID or package (optional)" });
     this.target = InputState.new({ placeholder: '@ref, label="Button", or x y' });
     this.text = InputState.new({ placeholder: "Text to type into focused field" });
     this.task(cx, p.device ? "Opening device…" : "Looking for devices…", async () => {
@@ -157,21 +157,28 @@ export default class Devices extends View {
   controls() {
     const t = theme(), tools = this.tools, active = tools.opened;
     return v_flex().gap(8)
+      .child(div().child("1. Choose a device"))
       .child(h_flex().gap(6)
-        .child(this.button("devices-refresh", "Find devices", true, cx => this.task(cx, "Looking for devices…", () => this.discover())))
-        .child(this.button("devices-install", `Install tools ${VERSION}`, !active && !tools.customCli, cx => this.task(cx, "Installing device tools…", async () => { await tools.install(); await this.discover(); }))))
-      .child(v_flex().id("device-list").h(140).flex_none().gap(4).overflow_y_scrollbar().children(this.devices.map((d, i) =>
-        this.button(`device-${i}`, `${d.name} · ${d.platform} ${d.osVersion ?? ""} · ${d.kind === "device" ? "physical" : d.kind} · ${d.id.slice(-8)}`, !active, cx => {
+        .child(this.button("devices-refresh", "Refresh device list", true, cx => this.task(cx, "Looking for devices…", () => this.discover())))
+        .child(this.button("devices-install", "Install / repair tools", !active && !tools.customCli, cx => this.task(cx, "Installing device tools…", async () => { await tools.install(); await this.discover(); }))))
+      .child(div().text_color(t.muted).child(`Refresh lists local phones and simulators. Install / repair downloads device tools ${VERSION}.`))
+      .when(this.devices.length === 0, el => el.child(div().text_color(t.muted).child("No devices listed. Refresh after connecting a phone or creating a simulator in Xcode / Android Studio.")))
+      .child(v_flex().id("device-list").max_h(140).flex_none().gap(4).overflow_y_scrollbar().children(this.devices.map((d, i) =>
+        this.button(`device-${i}`, `${tools.device?.id === d.id && tools.device?.platform === d.platform ? "Selected: " : ""}${d.name} · ${d.platform} ${d.osVersion ?? ""} · ${d.kind === "device" ? "physical" : d.kind} · ${d.booted === false ? "stopped · " : ""}${d.id.slice(-8)}`, !active, cx => {
           tools.select(d); this.details = ""; cx.notify();
         }))))
+      .child(div().child("2. App to open (optional)"))
       .child(this.input(this.app))
-      .child(this.button("device-open", this.global ? "Connect" : "Open app", Boolean(tools.device) && !active, cx => this.task(cx, "Connecting…", async () => {
+      .child(div().text_color(t.muted).child("Use an installed app ID, such as com.example.app, or leave blank to view the device. Stopped Android emulators start in the background."))
+      .child(this.button("device-open", "Connect device", Boolean(tools.device) && !active, cx => this.task(cx, "Connecting…", async () => {
         if (this.app.value().trim()) await tools.open(this.app.value()); else await tools.openDevice();
         await fs.unlink(`${this.controlDir}/closed.json`).catch(() => {});
         if (this.global) this.showControls = false;
       })))
       .when(tools.device?.kind === "device" && tools.device?.platform === "ios", el => el.child(div().text_color(t.muted).child("iPhone: trust this Mac, enable Developer Mode, and configure XCTest runner signing.")))
-      .child(this.button("device-snapshot", "Read UI", active, cx => this.task(cx, "Reading UI…", async () => { this.details = JSON.stringify(await tools.snapshot(), null, 2); })))
+      .when(active, el => el.child(div().child("Manual input — you can also tap and type directly in the live screen.")))
+      .child(this.button("device-snapshot", "Inspect screen text", active, cx => this.task(cx, "Reading UI…", async () => { this.details = JSON.stringify(await tools.snapshot(), null, 2); })))
+      .child(div().text_color(t.muted).child("Lists buttons, text and target refs for automation. It does not refresh the video."))
       .child(this.input(this.target))
       .child(h_flex().gap(6)
         .child(this.button("device-click", "Tap target", active, cx => this.task(cx, "Tapping…", async () => { this.details = ""; await tools.act("click", this.target.value()); })))
@@ -183,15 +190,22 @@ export default class Devices extends View {
 
   render() {
     const t = theme(), tools = this.tools, active = tools.opened, frame = tools.frame;
+    const captureOnly = tools.device?.platform === "ios" && tools.device?.kind === "device";
     const width = frame ? Math.min(Math.max(80, this.width - 24), 360, Math.max(200, (this.height ?? 850) - 160) * frame.width / frame.height) : 0;
     return v_flex().id("devices").size_full().bg(t.surface).text_color(t.foreground).text_size(12)
       .on_size_change((s, cx) => { if (this.width !== s.width || this.height !== s.height) { this.width = s.width; this.height = s.height; cx.notify(); } })
       .p(12).gap(8)
       .child(div().text_size(15).font_semibold().child(tools.device?.name ?? "Devices"))
       .child(h_flex().gap(6)
-        .child(this.button("device-controls", this.showControls ? "Hide controls" : "Controls", true, cx => { this.showControls = !this.showControls; cx.notify(); }))
-        .child(this.button("device-capture", "Reconnect", active, cx => { this.liveRevision++; cx.notify(); }))
-        .child(this.button("device-close", this.global ? "Disconnect" : "Close app / release", active, cx => this.task(cx, "Closing app session…", async () => { await tools.release(); this.details = ""; if (this.global) this.showControls = true; }))))
+        .child(this.button("device-controls", this.showControls ? "Hide setup" : "Setup & input", true, cx => { this.showControls = !this.showControls; cx.notify(); }))
+        .child(this.button("device-capture", captureOnly ? "Refresh capture" : "Restart video", active, cx => {
+          if (captureOnly) this.task(cx, "Capturing screen…", () => tools.capture());
+          else { this.liveRevision++; cx.notify(); }
+        }))
+        .child(this.button("device-close", "Disconnect", active, cx => this.task(cx, "Closing app session…", async () => { await tools.release(); this.details = ""; if (this.global) this.showControls = true; }))))
+      .when(active, el => el.child(div().text_color(t.muted).child(captureOnly
+        ? "Refresh capture takes a new screenshot. Disconnect ends the session and closes its app."
+        : "Black or frozen screen? Restart video keeps your app session. Disconnect ends the session and closes its app; the emulator stays running.")))
       .when(Boolean(this.status), el => el.child(div().text_color(t.muted).child(this.status)))
       .when(Boolean(this.error), el => el.child(div().text_color(t.blocked).child(this.error)))
       .when(Boolean(tools.device) && !(tools.device.platform === "ios" && tools.device.kind === "device"), el => el.child(
@@ -203,9 +217,9 @@ export default class Devices extends View {
         .child(div().text_color(t.dim).child(`Physical iPhone capture at ${frame.capturedAt} · live mirroring unavailable`))))
       .when(!frame && !this.busy, el => el.child(v_flex().py(32).gap(8)
         .child(div().child(this.global ? "Connect a device here. Its connection is shared across all workspaces." : "Your agent opens a device here and tests the app beside its terminal."))
-        .child(div().text_color(t.muted).child("Use Controls for manual setup. The live view and your agent share the same device."))))
+        .child(div().text_color(t.muted).child("Choose a device in Setup & input, then connect. You and your agent share its live screen."))))
       .when(this.showControls, el => el.child(v_flex().max_h(300).overflow_y_scrollbar().child(this.controls())))
-      .child(this.button("device-instructions", this.showInstructions ? "Hide agent commands" : "Agent commands", true, cx => { this.showInstructions = !this.showInstructions; cx.notify(); }))
+      .child(this.button("device-instructions", this.showInstructions ? "Hide agent instructions" : "Show agent instructions", true, cx => { this.showInstructions = !this.showInstructions; cx.notify(); }))
       .when(this.showInstructions, el => el.child(TextView.markdown("device-agent-commands", this.agentInstructions()).selectable(true)))
       .child(div().text_color(t.dim).child(this.global ? "Shared across all workspaces · hiding this panel keeps the device connected." : "Click the live screen to control it · closing this pane stops its stream and leaves the app session running."));
   }

@@ -145,12 +145,30 @@ test("agent instructions share the panel session, quote paths, and avoid reopeni
 test("a stopped Android AVD is opened by name, then input targets its returned serial", async () => {
   const h = harness();
   h.tools.select({ ...android, id: "Pixel_8_API_36", booted: false });
-  h.respond(args => ok(args.includes("open") ? { id: "emulator-5554" } : {}));
+  h.respond(args => ok(args.includes("boot") || args.includes("open") ? { id: "emulator-5554" } : {}));
   await h.tools.open("com.example.flutter");
+  expect(h.calls[0].args.slice(1, 3)).toEqual(["boot", "--headless"]);
   expect(h.calls[0].args).toContain("--device");
   expect(h.calls[0].args).toContain("Pixel_8_API_36");
+  expect(h.calls[1].args).toContain("open");
   expect(h.calls[1].args).toContain("--serial");
   expect(h.calls[1].args).toContain("emulator-5554");
+});
+
+test("manual Android connection boots in the background and stops on boot failure", async () => {
+  const h = harness();
+  h.tools.select({ ...android, id: "Pixel_8_API_36", booted: false });
+  h.respond(args => args.includes("boot") ? ok({ id: "emulator-5556" }) : ok({}));
+  await h.tools.openDevice();
+  expect(h.calls[0].args).toContain("--headless");
+  expect(h.calls[1].args).toContain("emulator-5556");
+  expect(h.calls[2].args).toContain("emulator-5556");
+  const failed = harness();
+  failed.tools.select({ ...android, booted: false });
+  failed.respond(() => ({ code: 1, stderr: "Boot failed", stdout: "" }));
+  await expect(failed.tools.openDevice()).rejects.toThrow("Boot failed");
+  expect(failed.tools.opened).toBe(false);
+  expect(failed.calls).toHaveLength(1);
 });
 
 test("reload restores only this panel's live session without launching or closing any app", async () => {

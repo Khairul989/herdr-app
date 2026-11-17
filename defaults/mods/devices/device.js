@@ -97,6 +97,7 @@ export class DeviceSession {
   async open(app) {
     if (this.opened) throw new Error("Close the current app session first.");
     if (!app.trim() || app.trim().startsWith("-")) throw new Error("Enter the installed app's bundle ID or package name.");
+    await this.bootInBackground();
     // Cold simulator boots can exceed the CLI's default request budget.
     const opened = await this.call(["open", app.trim(), "--timeout", "540000"]);
     // An Android AVD name becomes a serial after boot. Subsequent input targets that serial.
@@ -108,10 +109,19 @@ export class DeviceSession {
 
   async openDevice() {
     if (this.opened) throw new Error("Disconnect the current device first.");
+    await this.bootInBackground();
     const opened = await this.call(["open", "--timeout", "540000"]);
     if (typeof opened?.id === "string" && opened.id) this.device = { ...this.device, id: opened.id, booted: true };
     this.opened = true;
     return this.capture();
+  }
+
+  async bootInBackground() {
+    if (this.device?.platform !== "android" || this.device.kind !== "emulator" || this.device.booted !== false) return;
+    // Boot owns the headless option; open would otherwise start a GUI emulator.
+    const booted = await this.call(["boot", "--headless", "--timeout", "540000"]);
+    if (typeof booted?.id !== "string" || !booted.id) throw new Error("Android boot returned no device serial. Find devices again before connecting.");
+    this.device = { ...this.device, id: booted.id, booted: true };
   }
 
   async connect(devices, id, platform, app) {
