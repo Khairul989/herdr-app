@@ -1579,6 +1579,9 @@ impl AppWindow {
         let tab_shown = self.shows_tab();
         let revealed = tab_shown && !self.tab_shown;
         self.tab_shown = tab_shown;
+        if no_dialog && (pane_changed || revealed) {
+            mods::device_view::return_focus(window);
+        }
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
             if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p, cx)) {
                 f.focus(window, cx);
@@ -5257,7 +5260,12 @@ impl Render for AppWindow {
                     }
                 }
             }))
-            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer = ev.position))
+            .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, window, _| {
+                // A click delivered to GPUI is outside the native Devices view.
+                // GPUI's focus handles alone don't change AppKit's first responder.
+                mods::device_view::return_focus(window);
+                this.pointer = ev.position;
+            }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
                 this.drag_window(ev, window);
                 if this.drag.is_none() {

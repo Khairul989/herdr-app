@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { createHash } from "node:crypto";
-import { actionArgs, drive, main, ACTIONS, FLAGS } from "../defaults/mods/devices/agent.mjs";
-import { keyName, runOptions, sendKey, annotateSnapshot, compactSnapshot, shareSheet } from "../defaults/mods/devices/interaction.mjs";
+import { actionArgs, drive, main, ACTIONS, FLAGS, commandLock } from "../defaults/mods/devices/agent.mjs";
+import { keyName, runOptions, sendKey, annotateSnapshot, compactSnapshot, shareSheet, simulatorInput, simulatorInspect } from "../defaults/mods/devices/interaction.mjs";
 import { keyboardPatch, ensureKeyboardPatch } from "../defaults/mods/devices/backend.mjs";
 
 const rect = (x = 0, y = 0, width = 402, height = 874) => ({ x, y, width, height });
@@ -16,7 +16,7 @@ function harness() {
     async open(_path, mode) { expect(mode).toBe("wx");if(locked)throw Object.assign(new Error("busy"),{code:"EEXIST"});locked=true;return{async close(){}}; },
     async readFile(){return JSON.stringify(connection);}, async writeFile(...args){files.push(args);},async rename(...args){files.push(args);},async unlink(){locked=false;},
   };
-  const deps = {io,prepare:async()=>{},run:async(bin,args)=>{calls.push({bin,args});return respond(args);},keyInput:async(_connection,key)=>{calls.push({key});return {key};}};
+  const deps = {simInspect:async()=>undefined,simInput:async(_connection,command,{invoke,onInput})=>{onInput();return invoke(command);},io,prepare:async()=>{},run:async(bin,args)=>{calls.push({bin,args});return respond(args);},keyInput:async(_connection,key)=>{calls.push({key});return {key};}};
   return {calls,files,deps,connection,respond:fn=>{respond=fn;},locked:()=>locked};
 }
 
@@ -102,7 +102,7 @@ test("merchant fractions use observed full bounds and never guess from sibling d
 
 test("--snapshot returns refs measured after the action and capture, under the same lock", async () => {
   const h=harness(), result=await drive("herdr-test",["click","@e1","--snapshot"],false,h.deps);
-  expect(h.calls.map(c=>c.args[1])).toEqual(["click","screenshot","snapshot"]);
+  expect(h.calls.map(c=>c.args[1])).toEqual(["click","snapshot","screenshot"]);
   for(const call of h.calls) {expect(call.args).toContain("EXACT-UDID");expect(call.args).toContain("herdr-test");expect(call.args).toContain("/private-state");}
   expect(result.snapshot.refsGeneration).toBe(3);expect(result.snapshot.nodes[1].visible).toBe(true);expect(h.locked()).toBe(false);
 });
@@ -126,7 +126,7 @@ test("actions support --snapshot --compact without returning a second full tree"
   const h=harness(), output=await drive("herdr-test",["click","@e1","--snapshot","--compact"],false,h.deps);
   expect(output.snapshotText).toContain("@e2 Button Continue now [visible]");
   expect(output.snapshotRefsGeneration).toBe(3);expect(output.snapshot).toBeUndefined();expect(output.compact).toBeUndefined();
-  expect(h.calls.map(c=>c.args[1])).toEqual(["click","screenshot","snapshot"]);
+  expect(h.calls.map(c=>c.args[1])).toEqual(["click","snapshot","screenshot"]);
 });
 
 test("find lookup is explicitly read-only and only an explicit action can tap", async () => {
@@ -196,4 +196,131 @@ test("keyboard patch is checked, idempotent, and retains the ordinary occlusion 
   const writes:any[]=[];
   await expect(ensureKeyboardPatch("/tools/bin/agent-device.mjs",{readFile:async()=>"unexpected backend",writeFile:async(...args)=>writes.push(args),rename:async()=>{}})).rejects.toThrow("pinned");
   expect(writes).toEqual([]);
+});
+
+
+test("simulator taps validate backend refs before normalized HID input, and always release", async () => {
+  const events = [], lookups = [];
+  class SimHID { constructor(id) { events.push(id); } async setScreen(id) { events.push(id); return true; } async touch(...args) { events.push(args); } }
+  const native = { SimHID, axDescribe: async () => JSON.stringify([{frame:{x:0,y:0,width:402,height:874}}]) };
+  const connection = { device:{id:"EXACT",platform:"ios",kind:"simulator"} };
+  const deps = {toolsRoot:"/tools",loadNative:()=>native,pause:async()=>{},invoke:async args=>{lookups.push(args);return {node:{hittable:true,rect:{x:100,y:800,width:40,height:40}}};}};
+  const result = await simulatorInput(connection,["click","@e24"],deps);
+  expect(lookups).toEqual([["get","attrs","@e24"]]);expect(result.transport).toBe("simulator-hid");
+  expect(events.slice(2)).toEqual([["begin",120/402,820/874,402,874,0],["end",120/402,820/874,402,874,0]]);
+  events.length=0;
+  await expect(simulatorInput(connection,["click","@expired"],{...deps,invoke:async()=>{throw Error("expired ref frame");}})).rejects.toThrow("expired");
+  expect(events).toEqual(["EXACT",0]);
+  events.length=0;
+  const withKeyboard={...native,axDescribe:async()=>JSON.stringify([{frame:{x:0,y:0,width:402,height:874},children:[{type:"Keyboard",frame:{x:0,y:600,width:402,height:274}}]}])};
+  await expect(simulatorInput(connection,["click","@e24"],{...deps,loadNative:()=>withKeyboard})).rejects.toThrow("behind the keyboard");expect(events).toEqual(["EXACT",0]);
+  events.length=0;
+  await expect(simulatorInput(connection,["click","900","900"],deps)).rejects.toThrow("outside");expect(events).toEqual(["EXACT",0]);
+  events.length=0;
+  await expect(simulatorInput(connection,["click","@e24"],{...deps,pause:async()=>{throw Error("interrupted");}})).rejects.toThrow("interrupted");
+  expect(events.at(-1)[0]).toBe("end");
+});
+
+test("simulator typing uses native accessibility text input, stopping on rejection", async () => {
+  const characters=[];
+  const native={SimHID:class {async setScreen(){return true;}},axTypeKeyboardCharacter:async(id,text)=>{characters.push([id,text]);return text!=="!";}};
+  const deps={toolsRoot:"/tools",loadNative:()=>native,pause:async()=>{}};
+  await simulatorInput({device:{id:"EXACT"}},["type","A🐈"],deps);
+  expect(characters).toEqual([["EXACT","A"],["EXACT","🐈"]]);
+  await expect(simulatorInput({device:{id:"EXACT"}},["type","!stop"],deps)).rejects.toThrow("did not accept");
+  expect(characters.at(-1)).toEqual(["EXACT","!"]);
+});
+
+test("session locks retain live owners and reclaim a dead owner", async () => {
+  const fs=await import("node:fs/promises"), {tmpdir}=await import("node:os"), {join}=await import("node:path"), {spawnSync}=await import("node:child_process");
+  const directory=await fs.mkdtemp(join(tmpdir(),"herdr-lock-test-")), path=join(directory,"agent.lock");
+  try {
+    const lock=await commandLock(path,"busy");
+    expect(JSON.parse(await fs.readFile(path,"utf8")).pid).toBe(process.pid);
+    await expect(commandLock(path,"busy")).rejects.toThrow("busy");
+    await lock.close();await fs.unlink(path);
+    const dead=Number(spawnSync(process.execPath,["-e","console.log(process.pid)"],{encoding:"utf8"}).stdout.trim());
+    await fs.writeFile(path,JSON.stringify({pid:dead}));
+    const recovered=await commandLock(path,"busy");expect(JSON.parse(await fs.readFile(path,"utf8")).pid).toBe(process.pid);await recovered.close();
+    await fs.writeFile(path,JSON.stringify({pid:dead}));
+    const contenders=await Promise.allSettled([commandLock(path,"busy"),commandLock(path,"busy")]);
+    expect(contenders.filter(result=>result.status==="fulfilled")).toHaveLength(1);
+    for(const result of contenders)if(result.status==="fulfilled")await result.value.close();
+    expect(JSON.parse(await fs.readFile(path,"utf8")).pid).toBe(process.pid);
+  } finally {await fs.rm(directory,{recursive:true,force:true});}
+});
+
+
+test("native simulator input never invokes a backend click, and invalidates refs before capture", async () => {
+  const h=harness();
+  h.deps.simInput=async(_connection,_command,{onInput})=>{onInput();return {transport:"simulator-hid"};};
+  const output=await drive("herdr-test",["click","@e1"],false,h.deps);
+  expect(output.result.transport).toBe("simulator-hid");
+  expect(h.calls.map(c=>c.args[1])).toEqual(["snapshot","screenshot"]);
+  h.calls.length=0;
+  h.deps.simInput=async(_connection,_command,{onInput})=>{onInput();throw Error("partial input failed");};
+  await expect(drive("herdr-test",["click","@e1"],false,h.deps)).rejects.toThrow("partial input failed");
+  expect(h.calls.map(c=>c.args[1])).toEqual(["snapshot"]);expect(h.locked()).toBe(false);
+});
+
+test("backend command deadline stops even a child that ignores SIGTERM", async () => {
+  const {execute}=await import("../defaults/mods/devices/agent.mjs");
+  const start=Date.now();
+  await expect(execute(process.execPath,["-e","process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{timeout:300})).rejects.toThrow("timed out");
+  expect(Date.now()-start).toBeLessThan(5000);
+});
+
+test("a dead caller cancels the helper's child and releases its session lock", async () => {
+  const fs=await import("node:fs/promises"), {tmpdir}=await import("node:os"), {join}=await import("node:path"), {spawn}=await import("node:child_process");
+  const directory=await fs.mkdtemp(join(tmpdir(),"herdr-orphan-test-"));
+  const session="herdr-orphan-test", dir=join(directory,"device-panels",session), helper=join(directory,"helper.mjs"), parentScript=join(directory,"parent.mjs");
+  const module=new URL("../defaults/mods/devices/agent.mjs",import.meta.url).href;
+  await fs.mkdir(dir,{recursive:true});
+  await fs.writeFile(join(dir,"status.json"),JSON.stringify({opened:true,status:"ready",device:{platform:"android",kind:"device",id:"test"},node:process.execPath,cli:"unused",state:"unused"}));
+  await fs.writeFile(helper,`import {watchCaller,drive,execute} from ${JSON.stringify(module)}; import {writeFile} from 'node:fs/promises'; const stop=watchCaller(); try {await drive('${session}',['snapshot'],false,{prepare:async()=>{},run:async()=>execute(process.execPath,['-e',"setInterval(()=>{},1000)"])});} catch(error) {await writeFile(${JSON.stringify(join(directory,"result"))},error.message);} finally {stop();}`);
+  await fs.writeFile(parentScript,`import {spawn} from 'node:child_process'; const child=spawn(process.execPath,[${JSON.stringify(helper)}],{env:process.env,stdio:'ignore'}); console.log(child.pid);setInterval(()=>{},1000);`);
+  const parent=spawn(Bun.which("node"),[parentScript],{env:{...process.env,HERDR_APP_HOME:directory},stdio:["ignore","pipe","pipe"]});
+  let childPid;
+  const until=async test=>{const deadline=Date.now()+8000;while(Date.now()<deadline){if(await test())return;await new Promise(resolve=>setTimeout(resolve,25));}throw Error("fixture timeout");};
+  try {
+    parent.stdout.on("data",data=>{childPid=Number(String(data).trim());});
+    await until(async()=>Boolean(childPid)&&await fs.stat(join(dir,"agent.lock")).then(()=>true,()=>false));
+    // Positive control: this live helper really holds the lock before killing its caller.
+    expect(JSON.parse(await fs.readFile(join(dir,"agent.lock"),"utf8")).pid).toBe(childPid);
+    parent.kill("SIGKILL");
+    await until(async()=>await fs.readFile(join(directory,"result"),"utf8").then(text=>text.includes("disconnected"),()=>false));
+    expect(await fs.stat(join(dir,"agent.lock")).then(()=>true,()=>false)).toBe(false);
+    const lock=await commandLock(join(dir,"agent.lock"),"busy");await lock.close();
+  } finally {
+    parent.kill("SIGKILL");if(childPid)try{process.kill(childPid,"SIGKILL");}catch{}
+    await fs.rm(directory,{recursive:true,force:true});
+  }
+},15000);
+
+
+test("simulator inspection creates expiring refs from native AX and captures through the native display", async () => {
+  const files=new Map(), events=[];
+  const io={readFile:async path=>{if(!files.has(path))throw Error("missing");return files.get(path);},writeFile:async(path,data)=>files.set(path,data),rename:async(a,b)=>{files.set(b,files.get(a));files.delete(a);}};
+  const native={axDescribe:async()=>JSON.stringify([{type:"Application",frame:rect(),children:[{type:"Button",AXLabel:"Earnings",enabled:true,frame:rect(100,800,40,40)}]}]),
+    SimCapture:class {constructor(id){events.push(id);}async start(){events.push("start");}async activeScreenId(){return 1;}async screenshot(id,width){events.push([id,width]);return new Uint8Array([137,80,78,71]);}async stop(){events.push("stop");}}};
+  const connection={device:{id:"EXACT"},app:"app.test"}, deps={toolsRoot:"/tools",dir:"/session",io,loadNative:()=>native};
+  const first=await simulatorInspect(connection,["snapshot","-i"],deps);
+  expect(first.source).toBe("simulator-ax");expect(first.nodes[1].label).toBe("Earnings");
+  const ref=`@${first.nodes[1].ref}`;
+  expect((await simulatorInspect(connection,["get","attrs",ref],deps)).node.rect).toEqual(rect(100,800,40,40));
+  expect((await simulatorInspect(connection,["get","attrs",'label="Earnings"'],deps)).node.label).toBe("Earnings");
+  await simulatorInspect(connection,["snapshot","-i"],deps);
+  await expect(simulatorInspect(connection,["get","attrs",ref],deps)).rejects.toThrow("expired");
+  await simulatorInspect(connection,["screenshot","/screen.png"],deps);
+  expect(events).toEqual(["EXACT","start",[1,0],"stop"]);expect(files.get("/screen.png")).toEqual(new Uint8Array([137,80,78,71]));
+});
+
+test("agent screenshots reuse the exact live capture owner without stopping another native capture", async () => {
+  const calls=[],writes=[],bytes=new Uint8Array([137,80,78,71,13,10,26,10,1]);
+  const owner={pid:process.pid,device:"EXACT",platform:"ios",url:"http://127.0.0.1:43123/"};
+  const io={readdir:async()=>['owner.json'],readFile:async()=>JSON.stringify(owner),writeFile:async(...args)=>writes.push(args)};
+  const request=async(url,options)=>{calls.push([url,options]);return url.endsWith('stream-health')?{json:async()=>({available:true,device:'EXACT',platform:'ios'})}:{ok:true,arrayBuffer:async()=>bytes.buffer};};
+  const result=await simulatorInspect({device:{id:'EXACT'}},['screenshot','/proof.png'],{toolsRoot:'/tools',dir:'/session',io,request,loadNative:()=>({SimCapture:class{constructor(){throw Error('must not create a second capture');}}})});
+  expect(result.transport).toBe('shared-simulator-capture');expect(writes).toEqual([['/proof.png',bytes]]);expect(calls[1][1].method).toBe('POST');expect(calls[1][0]).toContain('device=EXACT');
+  await expect(simulatorInspect({device:{id:'EXACT'}},['screenshot','/proof.png'],{toolsRoot:'/tools',dir:'/session',io,request:async url=>url.endsWith('stream-health')?{json:async()=>({available:false,device:'EXACT',platform:'ios'})}:{ok:false,arrayBuffer:async()=>new Uint8Array().buffer},loadNative:()=>({SimCapture:class{constructor(){throw Error('must not create a second capture');}}})})).rejects.toThrow('reconnecting');
 });

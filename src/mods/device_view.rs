@@ -11,6 +11,13 @@ pub fn set_occluded(window: &Window, visible: &std::collections::HashSet<u64>, o
     let _ = (window, visible, occluded);
 }
 
+pub fn return_focus(window: &Window) {
+    #[cfg(target_os = "macos")]
+    macos::return_focus(window);
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 pub fn release(copy: u64) {
     #[cfg(target_os = "macos")]
     macos::release(copy);
@@ -94,8 +101,9 @@ mod retention_tests {
 mod macos {
     use gpui::{div, canvas, px, App, AppContext, Bounds, Context, Entity, IntoElement, ParentElement, Pixels, Render, Styled, Window};
     use gpui_shell::{ComponentArgs, HostValue};
+    use objc2_app_kit::NSView;
     use std::{cell::{Cell, RefCell}, io::{BufRead, BufReader}, process::{ChildStdin, Command, Stdio}, rc::{Rc, Weak}};
-    use wry::{WebView, WebViewBuilder, Rect, dpi::{LogicalPosition, LogicalSize}};
+    use wry::{WebView, WebViewBuilder, WebViewExtMacOS, Rect, dpi::{LogicalPosition, LogicalSize}};
 
     pub struct DeviceView {
         copy: u64,
@@ -106,6 +114,29 @@ mod macos {
     }
 
     struct NativeSurface { webview: WebView, visible: Cell<bool> }
+
+    impl NativeSurface {
+        fn return_focus(&self) -> bool {
+            let view = self.webview.webview();
+            let Some(window) = view.window() else { return false; };
+            let Some(responder) = window.firstResponder().and_then(|r| r.downcast::<NSView>().ok()) else { return false; };
+            // A WebKit child can be the first responder as well as the WKWebView itself.
+            responder.isDescendantOf(&view) && self.webview.focus_parent().is_ok()
+        }
+
+        fn set_visible(&self, visible: bool) {
+            if !visible {
+                self.return_focus();
+            }
+            let _ = self.webview.set_visible(visible);
+        }
+    }
+
+    impl Drop for NativeSurface {
+        fn drop(&mut self) {
+            self.return_focus();
+        }
+    }
 
     thread_local! {
         static VIEWS: RefCell<Vec<(gpui::WindowId, u64, Weak<NativeSurface>)>> = const { RefCell::new(Vec::new()) };
@@ -130,16 +161,29 @@ mod macos {
         OWNED.with_borrow_mut(|views| views.entries.retain(|(owner, _, _), _| *owner != copy));
     }
 
+    pub fn return_focus(window: &Window) {
+        let id = window.window_handle().window_id();
+        let views: Vec<_> = VIEWS.with_borrow(|views| views.iter()
+            .filter(|(owner, _, _)| *owner == id)
+            .filter_map(|(_, _, weak)| weak.upgrade())
+            .collect());
+        views.iter().any(|view| view.return_focus());
+    }
+
     pub fn set_occluded(window: &Window, visible: &std::collections::HashSet<u64>, occluded: bool) {
         let id = window.window_handle().window_id();
         OCCLUDED.with_borrow_mut(|windows| { if occluded { windows.insert(id); } else { windows.remove(&id); } });
         // Child NSViews draw above the GPU scene. Hide them while a Herdr
         // overlay is open so they cannot cover or intercept its controls.
-        VIEWS.with_borrow_mut(|views| views.retain(|(owner, copy, weak)| {
-            let Some(view) = weak.upgrade() else { return false; };
-            if *owner == id { let _ = view.webview.set_visible(view.visible.get() && visible.contains(copy) && !occluded); }
-            true
-        }));
+        let views: Vec<_> = VIEWS.with_borrow_mut(|views| {
+            views.retain(|(_, _, view)| view.strong_count() != 0);
+            views.iter().filter(|(owner, _, _)| *owner == id)
+                .filter_map(|(_, copy, view)| Some((*copy, view.upgrade()?)))
+                .collect()
+        });
+        for (copy, view) in views {
+            view.set_visible(view.visible.get() && visible.contains(&copy) && !occluded);
+        }
     }
 
     impl DeviceView {
@@ -221,7 +265,7 @@ mod macos {
                 });
                 let occluded = OCCLUDED.with_borrow(|windows| windows.contains(&window.window_handle().window_id()));
                 surface.visible.set(visible);
-                let _ = webview.set_visible(visible && !occluded);
+                surface.set_visible(visible && !occluded);
             }
         }
     }

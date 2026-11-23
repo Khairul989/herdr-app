@@ -235,7 +235,7 @@ export default class Devices extends View {
         .child(this.button("device-close", "Disconnect", active, cx => this.task(cx, "Closing app session…", async () => { await tools.release(); this.details = ""; if (this.global) this.showControls = true; }))))
       .when(active, el => el.child(div().text_color(t.muted).child(physical
         ? "Experimental live iPhone video. Start live video to enable it; tap or drag the screen. Use Setup & input for text. Refresh capture switches to a screenshot."
-        : "Black or frozen screen? Restart video keeps your app session. Disconnect ends the session and closes its app; the emulator stays running.")))
+        : "Video reconnects automatically if frames stop; your device app stays open. Restart video replaces only the stream. Disconnect ends the session and closes its app; the emulator stays running.")))
       .when(Boolean(this.status), el => el.child(div().text_color(t.muted).child(this.status)))
       .when(this.liveBusy, el => el.child(div().text_color(t.muted).child("Preparing real-iPhone video tools (first use builds the native adapter)…")))
       .when(Boolean(this.liveError), el => el.child(div().text_color(t.blocked).child(this.liveError)))

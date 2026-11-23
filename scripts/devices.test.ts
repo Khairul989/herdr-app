@@ -435,3 +435,23 @@ test("ios-register refuses an unlisted phone or a failed build without touching 
   await expect(registerIphone(["--device", "UDID-1"], { io, run: failing, home: "/u", scratch: "/tmp" })).rejects.toThrow("No profiles");
   expect(removed.filter(p => p.startsWith("/u/"))).toEqual([]);
 });
+
+test("stopped iOS simulators boot through simctl before backend open, without launching a GUI", async () => {
+  const h = harness(), simulator = { ...ios, id: "SIM-EXACT", kind: "simulator", booted: false };
+  h.tools.select(simulator);
+  h.respond(args => args[0] === "simctl" ? { code: 0, stdout: "", stderr: "" } : ok({}));
+  await h.tools.open("com.example.flutter");
+  expect(h.calls.slice(0, 2).map(c => [c.bin, c.args])).toEqual([
+    ["xcrun", ["simctl", "boot", simulator.id]], ["xcrun", ["simctl", "bootstatus", simulator.id, "-b"]],
+  ]);
+  expect(h.calls[2].args[1]).toBe("open");
+  expect(h.tools.device.booted).toBe(true);
+});
+
+test("iOS device-only open also preboots headlessly, and boot failures cannot fall through to GUI startup", async () => {
+  const h = harness();
+  h.tools.select({ ...ios, id: "SIM-EXACT", kind: "simulator", booted: false });
+  h.respond(() => ({code: 1, stdout: "", stderr: "simctl boot failed"}));
+  await expect(h.tools.openDevice()).rejects.toThrow("simctl boot failed");
+  expect(h.calls).toHaveLength(1);expect(h.calls[0].bin).toBe("xcrun");expect(h.tools.opened).toBe(false);
+});
