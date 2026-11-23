@@ -159,6 +159,16 @@ export class DeviceSession {
   }
 
   async bootInBackground() {
+    if (this.device?.platform === "ios" && this.device.kind === "simulator" && this.device.booted !== true) {
+      // The backend's cold boot opens Simulator/DeviceHub. Boot the runtime only,
+      // so the subsequent session open sees an already booted headless device.
+      const boot = await this.exec("xcrun", ["simctl", "boot", this.device.id], { timeout: 180000 });
+      if (boot.code !== 0 && !/current state: booted|already booted/i.test(`${boot.stderr}\n${boot.stdout}`)) throw new Error(boot.stderr || boot.stdout || "Simulator boot failed.");
+      const ready = await this.exec("xcrun", ["simctl", "bootstatus", this.device.id, "-b"], { timeout: 180000 });
+      if (ready.code !== 0) throw new Error(ready.stderr || ready.stdout || "Simulator did not finish booting.");
+      this.device = { ...this.device, booted: true };
+      return;
+    }
     if (this.device?.platform !== "android" || this.device.kind !== "emulator" || this.device.booted !== false) return;
     // Boot owns the headless option; open would otherwise start a GUI emulator.
     const booted = await this.call(["boot", "--headless", "--timeout", "540000"]);

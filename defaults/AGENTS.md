@@ -929,6 +929,9 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 
 ### Devices
 
+For simulator input hangs, stale locks, video stalls or unexpected DeviceHub windows,
+see `docs/devices-troubleshooting.md` in the herdr-app source repository.
+
 Devices is a global toolbar panel beside Files, Changes and Notes. It belongs to Herdr,
 not an agent, tab or workspace. Connect a selected simulator, emulator or phone there;
 an app ID is optional for manual device connection. Switching workspaces or hiding the
@@ -958,11 +961,16 @@ and compact snapshots. Global connection requests/status live under `device-glob
 per-session evidence/control files remain under `device-panels/SESSION`.
 
 `run` accepts inspection/input commands and binds the target and session. The native right-side
-viewer streams continuously, including while the agent is idle. Click, drag, scroll or type
+viewer streams continuously, including while the agent is idle. Simulator boot stays
+headless: Herdr boots iOS runtimes through simctl and never needs a DeviceHub window.
+If video stalls, the viewer marks its retained last frame as reconnecting and replaces
+the video connection automatically; a crashed owned capture server restarts without
+reopening the app or repeating input. Click, drag, scroll or type
 directly in the live screen; the agent operates the same device. Coordinate input ownership.
 The helper refuses target overrides and concurrent helper commands on the same session.
 `status SESSION` reads the agent connection; it does not certify that video has decoded.
-Each successful agent action also saves a PNG as evidence. Check expected UI state to prove assertions.
+Each successful agent action also saves a PNG as evidence, reusing the live capture
+instead of starting a competing capture session. Check expected UI state to prove assertions.
 `agent.mjs --help` lists commands and flags. `key enter|return|backspace|delete|tab`
 sends actual simulator HID keys or Android keyevents; `press Enter`, `press Backspace`
 and `press Tab` are aliases. For physical iPhones use `keyboard enter` and the keyboard's
@@ -970,6 +978,14 @@ own semantic keys instead; arbitrary hardware-key injection is not supported the
 Append `--snapshot` to an action to return a fresh interactive frame in `data.snapshot`.
 An action that succeeded but could not capture fresh refs reports `data.snapshotError`;
 do not repeat the action blindly. Hardware key input always advances the backend ref frame.
+On local iOS simulators, helper `click`, `press` and `type` use the viewer's native
+CoreSimulator HID/accessibility input without an XCTest runner build. Taps accept a
+ref/selector or point coordinates, without backend flags; type accepts one text argument.
+Snapshots, ref lookup and evidence captures use that same native provider, avoiding
+the backend snapshot bridge's XCTest fallback. Refs are validated before tapping
+and refreshed after input. Physical devices retain
+backend input. Commands record the lock owner's PID, recover dead owners, and cancel
+child commands when the caller exits; backend subprocesses have a 45-second limit.
 `snapshot -i --compact` prints plain text, one `@ref type label [visibility]` per line,
 with label whitespace flattened; omit `--compact` for the existing JSON shape. Combine
 `--snapshot --compact` on actions for `data.snapshotText` and `data.snapshotRefsGeneration`

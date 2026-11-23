@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { chooseDevice, mobileDevices, readSigning, result, signingPath, signingVars, target, VERSION } from "./device.js";
-import { runOptions, annotateSnapshot, compactSnapshot, sendKey, shareSheet } from "./interaction.mjs";
+import { runOptions, annotateSnapshot, compactSnapshot, sendKey, shareSheet, simulatorInput, simulatorInspect } from "./interaction.mjs";
 import { ensureKeyboardPatch } from "./backend.mjs";
 
 export const root = resolve(process.env.HERDR_APP_HOME || join(homedir(), ".config/herdr-app"));
@@ -20,16 +20,40 @@ export function sessionDir(session) {
   return join(root, "device-panels", session);
 }
 
-export async function execute(command, args) {
+const cancellation = new AbortController();
+
+export function watchCaller() {
+  const parent = process.ppid;
+  const abort = () => cancellation.abort(new Error("Device caller disconnected or command was interrupted."));
+  process.once("SIGTERM", abort); process.once("SIGINT", abort);
+  const watch = setInterval(() => { if (process.ppid !== parent) abort(); }, 250);
+  watch.unref();
+  return () => { clearInterval(watch); process.off("SIGTERM", abort); process.off("SIGINT", abort); };
+}
+
+export async function execute(command, args, { timeout = 45000 } = {}) {
   // Saved iPhone signing reaches any backend daemon this call starts; it wins, as in the panel.
   const env = { ...process.env, ...await readSigning(fs, root), PATH: `${resolve(process.execPath, "..")}${process.platform === "win32" ? ";" : ":"}${process.env.PATH || ""}` };
+  cancellation.signal.throwIfAborted();
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "";
+    const child = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    let stdout = "", stderr = "", failure, force;
+    const kill = signal => {
+      try { if (process.platform === "win32") child.kill(signal); else if (child.pid) process.kill(-child.pid, signal); } catch (error) { if (error.code !== "ESRCH") throw error; }
+    };
+    const stop = error => {
+      if (failure) return;
+      failure = error; kill("SIGTERM");
+      force = setTimeout(() => kill("SIGKILL"), 2000);
+    };
+    const abort = () => stop(cancellation.signal.reason);
+    const timer = setTimeout(() => stop(new Error(`Device command timed out after ${timeout}ms.`)), timeout);
+    cancellation.signal.addEventListener("abort", abort, { once: true });
+    const cleanup = () => { clearTimeout(timer); clearTimeout(force); cancellation.signal.removeEventListener("abort", abort); };
     child.stdout.on("data", data => { stdout += data; });
     child.stderr.on("data", data => { stderr += data; });
-    child.on("error", reject);
-    child.on("close", code => resolve({ code, stdout, stderr }));
+    child.on("error", error => { cleanup(); reject(error); });
+    child.on("close", code => { cleanup(); if (failure) reject(failure); else resolve({ code, stdout, stderr }); });
   });
 }
 
@@ -176,10 +200,7 @@ async function openPanel(args) {
 export async function openGlobal(device, appId, { io = fs, command = appCommand, pause = delay, timeout = 600000, refresh = refreshSigningDaemon } = {}) {
   const directory = join(root, "device-global");
   await io.mkdir(directory, { recursive: true });
-  const lock = await io.open(join(directory, "open.lock"), "wx").catch(error => {
-    if (error.code === "EEXIST") throw new Error("Another shared-device connection is in progress.");
-    throw error;
-  });
+  const lock = await commandLock(join(directory, "open.lock"), "Another shared-device connection is in progress.", io);
   let sessionLock, sessionLockPath;
   try {
     let existing;
@@ -187,10 +208,7 @@ export async function openGlobal(device, appId, { io = fs, command = appCommand,
     catch (error) { if (error.code !== "ENOENT") throw error; }
     if (existing?.session) {
       sessionLockPath = join(sessionDir(existing.session), "agent.lock");
-      sessionLock = await io.open(sessionLockPath, "wx").catch(error => {
-        if (error.code === "EEXIST") throw new Error("Another agent command holds the shared device. Wait for it to finish.");
-        throw error;
-      });
+      sessionLock = await commandLock(sessionLockPath, "Another agent command holds the shared device. Wait for it to finish.", io);
     }
     // Under the open lock, so no other shared open can race the restart.
     if (device.platform === "ios" && device.kind === "device") await refresh();
@@ -201,6 +219,7 @@ export async function openGlobal(device, appId, { io = fs, command = appCommand,
     await command("layout.show", { id: "panel" });
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
+      cancellation.signal.throwIfAborted();
       let status;
       try { status = JSON.parse(await io.readFile(join(directory, "status.json"), "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
       if (status?.requestId === id && status.status === "error") throw new Error(status.error);
@@ -268,7 +287,7 @@ export async function registerIphone(args, { io = fs, run = execute, home = home
   const derived = join(scratch, `herdr-ios-register-${randomUUID()}`);
   const build = await run("xcodebuild", ["build-for-testing", "-project", project, "-scheme", "AgentDeviceRunner", "-destination", `id=${options.device}`, "-derivedDataPath", derived,
     "-allowProvisioningUpdates", "-allowProvisioningDeviceRegistration", "CODE_SIGN_STYLE=Automatic", `DEVELOPMENT_TEAM=${team}`,
-    `AGENT_DEVICE_IOS_RUNNER_APP_BUNDLE_ID=${bundle}`, `AGENT_DEVICE_IOS_RUNNER_TEST_BUNDLE_ID=${bundle}.uitests`]);
+    `AGENT_DEVICE_IOS_RUNNER_APP_BUNDLE_ID=${bundle}`, `AGENT_DEVICE_IOS_RUNNER_TEST_BUNDLE_ID=${bundle}.uitests`], { timeout: 600000 });
   await io.rm(derived, { recursive: true, force: true });
   if (build.code !== 0 || !build.stdout.includes("TEST BUILD SUCCEEDED")) {
     const errors = [...new Set(`${build.stdout}\n${build.stderr}`.split("\n").filter(line => line.includes("error:")).map(line => line.trim()))].slice(0, 8);
@@ -280,15 +299,44 @@ export async function registerIphone(args, { io = fs, run = execute, home = home
   return { registered: true, device: options.device, team, bundleId: bundle, clearedCaches: cleared, next: "Close and open the device again so the backend picks up the new runner. If the phone reports an untrusted developer, trust it in Settings > General > VPN & Device Management." };
 }
 
-export async function drive(session, args, close = false, { io = fs, run = execute, prepare = ensureKeyboardPatch, keyInput = sendKey } = {}) {
+export async function commandLock(path, message, io = fs) {
+  const create = async () => {
+    // Publish a complete owner record atomically; SIGKILL cannot leave an empty lock.
+    const candidate = io.link ? `${path}.owner-${process.pid}-${randomUUID()}` : path;
+    const handle = await io.open(candidate, "wx");
+    try {
+      if (handle.writeFile) await handle.writeFile(JSON.stringify({ pid: process.pid }));
+      if (io.link) await io.link(candidate, path);
+      return handle;
+    } catch (error) { await handle.close(); throw error; }
+    finally { if (io.link) await io.unlink(candidate).catch(() => {}); }
+  };
+  const dead = async () => {
+    let owner;
+    try { owner = JSON.parse(await io.readFile(path, "utf8")); } catch { return false; }
+    if (!Number.isInteger(owner?.pid) || owner.pid <= 1) return false;
+    try { process.kill(owner.pid, 0); return false; } catch (error) { return error.code === "ESRCH"; }
+  };
+  try { return await create(); }
+  catch (error) { if (error.code !== "EEXIST") throw error; }
+  if (!await dead()) throw new Error(message);
+  // Serialize stale recovery, then recheck: a second caller must never unlink
+  // the first caller's newly acquired live lock.
+  const recoveryPath = `${path}.recovery`;
+  const recovery = await commandLock(recoveryPath, message, io);
+  try {
+    if (!await dead()) throw new Error(message);
+    await io.unlink(path).catch(error => { if (error.code !== "ENOENT") throw error; });
+    return await create();
+  } finally { await recovery.close(); await io.unlink(recoveryPath); }
+}
+
+export async function drive(session, args, close = false, { io = fs, run = execute, prepare = ensureKeyboardPatch, keyInput = sendKey, simInput = simulatorInput, simInspect = simulatorInspect } = {}) {
   const dir = sessionDir(session);
   const options = close ? { command: [] } : runOptions(args);
   if (!close) actionArgs(options.command);
   // Agents sharing a panel must not interleave their input and screenshots.
-  const lock = await io.open(join(dir, "agent.lock"), "wx").catch(error => {
-    if (error.code === "EEXIST") throw new Error("Another agent command holds this session. Wait for it to finish.");
-    throw error;
-  });
+  const lock = await commandLock(join(dir, "agent.lock"), "Another agent command holds this session. Wait for it to finish.", io);
   try {
     const connection = JSON.parse(await io.readFile(join(dir, "status.json"), "utf8"));
     if (close && !connection.opened && connection.status === "detached" && connection.device) {
@@ -304,15 +352,52 @@ export async function drive(session, args, close = false, { io = fs, run = execu
     if (!connection.opened || (close ? connection.status === "busy" : connection.status !== "ready")) throw new Error(connection.error || "The panel has no ready app session.");
     if (!close) await prepare(connection.cli);
     const flags = [...target(connection.device, session), "--state-dir", connection.state, "--json"];
-    const invoke = argv => run(connection.node, [connection.cli, ...argv, ...flags]).then(result);
+    const localSimulator = connection.device.platform === "ios" && connection.device.kind === "simulator";
+    const invoke = async argv => {
+      if (localSimulator && !close) {
+        const inspected = await simInspect(connection, argv, {toolsRoot: join(root, "device-tools"), dir, io});
+        if (inspected !== undefined) return inspected;
+      }
+      if (localSimulator && !close) {
+        // Backend-only operations still accept simulator refs, resolved to the
+        // same explicit identity rather than a meaningless backend ref number.
+        const resolved = [];
+        for (const arg of argv) {
+          if (!arg.startsWith("@")) { resolved.push(arg); continue; }
+          const inspected = await simInspect(connection, ["get", "attrs", arg], {toolsRoot: join(root, "device-tools"), dir, io});
+          if (!inspected) { resolved.push(arg); continue; }
+          const {node} = inspected;
+          if (!node.identifier && !node.label) throw new Error("This target has no backend selector; use native click/type.");
+          resolved.push(node.identifier ? `id=${JSON.stringify(node.identifier)}` : `label=${JSON.stringify(node.label)} role=${node.type}`);
+        }
+        argv = resolved;
+        if (!["get", "is", "wait", "appstate", "find"].includes(argv[0])) await io.unlink(join(dir, "simulator-frame.json")).catch(() => {});
+      }
+      return run(connection.node, [connection.cli, ...argv, ...flags]).then(result);
+    };
     let history = {};
     try { history = JSON.parse(await io.readFile(join(dir, "visibility-history.json"), "utf8")); } catch {}
     if (!history || typeof history !== "object" || Array.isArray(history)) history = {};
     const annotate = data => annotateSnapshot(data, history);
     const dismiss = options.command[0] === "keyboard" && options.command[1] === "dismiss";
     const beforeDismiss = dismiss ? await invoke(["appstate"]) : null;
-    let data;
-    if (options.command[0] === "alert") {
+    let data, inputSnapshot, inputSnapshotError, attemptedInput = false;
+    if (localSimulator && options.command[0] === "find") {
+      const field = ["text", "label", "value", "role", "id"].includes(options.command[1]) ? options.command[1] : "label";
+      const index = ["text", "label", "value", "role", "id"].includes(options.command[1]) ? 3 : 2;
+      if (options.command[index] === "click") options.command = ["click", `${field === "text" ? "label" : field}=${JSON.stringify(options.command[index - 1])}`, ...options.command.slice(index + 1)];
+    }
+    const nativeInput = !close && connection.device.platform === "ios" && connection.device.kind === "simulator" && ["click", "press", "type"].includes(options.command[0]);
+    if (nativeInput) {
+      try { data = await simInput(connection, options.command, { toolsRoot: join(root, "device-tools"), invoke, signal: cancellation.signal, onInput: () => { attemptedInput = true; } }); }
+      finally {
+        if (attemptedInput) {
+          try { inputSnapshot = await invoke(["snapshot", "-i"]); }
+          catch (error) { inputSnapshotError = error.message; }
+        }
+      }
+    }
+    else if (options.command[0] === "alert") {
       const tree = await invoke(["snapshot", "-i", "--raw"]);
       const surface = shareSheet(tree);
       const action = options.command[1] || "get";
@@ -342,9 +427,11 @@ export async function drive(session, args, close = false, { io = fs, run = execu
     let snapshot, snapshotError;
     // HID/ADB input bypasses the backend's mutation journal. Always advance its
     // ref generation after these keys so old refs cannot silently remain valid.
-    if (options.snapshot && options.command[0] !== "snapshot" || options.command[0] === "key") {
-      try { snapshot = annotate(await invoke(["snapshot", "-i"])); }
-      catch (error) { snapshotError = error.message; }
+    if (options.snapshot && options.command[0] !== "snapshot" || options.command[0] === "key" || nativeInput) {
+      try {
+        if (nativeInput && inputSnapshotError) throw new Error(inputSnapshotError);
+        snapshot = annotate(nativeInput ? inputSnapshot : await invoke(["snapshot", "-i"]));
+      } catch (error) { snapshotError = error.message; }
     }
     const output = { session, result: options.command[0] === "snapshot" ? annotate(data) : data, preview: join(dir, "screen.png"), previewRevision: revision };
     if (options.snapshot && snapshot) {
@@ -394,7 +481,8 @@ export async function main(args) {
 
 const entry = process.argv[1] ? await fs.realpath(process.argv[1]).catch(() => null) : null;
 if (entry && import.meta.url === pathToFileURL(entry).href) {
-  main(process.argv.slice(2)).then(data => console.log(data.help ?? data.compact ?? JSON.stringify({ success: true, data }, null, 2))).catch(error => {
+  const stopWatching = watchCaller();
+  main(process.argv.slice(2)).finally(stopWatching).then(data => console.log(data.help ?? data.compact ?? JSON.stringify({ success: true, data }, null, 2))).catch(error => {
     console.error(JSON.stringify({ success: false, error: { message: error.message } }));
     process.exitCode = 1;
   });

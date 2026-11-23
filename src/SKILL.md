@@ -160,10 +160,12 @@ those files or the generated guide. The app rewrites them on start.
   Coordinate input; `close current` disconnects it explicitly. A different active device/app
   is never silently replaced. Explicit `--pane PANE_ID` retains legacy sibling-pane support.
   Switching workspaces or hiding the panel retains its browser/stream; Restart video replaces it.
+  Simulator startup is headless. Stalled video shows a reconnecting state and recovers without reopening the device app or repeating input.
   Setup & input explains device selection and manual actions; Inspect screen text reads automation refs.
   Stopped Android emulators boot in the background; running ones keep their current window mode.
   Use `key enter|backspace|tab`, `snapshot -i --compact`, and `click @e1 --snapshot --compact`
   for compact testing loops. `find TEXT` is read-only; `find TEXT click` is an explicit tap.
+  Simulator helper taps and typing use native input without an XCTest runner; dead callers release their command locks.
   Native video is absent from `herdr-app shot`; use device snapshots/captures for assertions.
   `agent.mjs --help` and the installed Devices guide cover selectors, Flutter and physical phones.
 - Virtual lists expose actual scroll position through `VirtualListScrollHandle.metrics()`;

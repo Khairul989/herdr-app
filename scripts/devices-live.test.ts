@@ -97,3 +97,61 @@ test('late readiness cannot revive a stream after a pane requests shutdown', asy
   expect(f.hub.status().url).toBeNull();
   expect(f.spawns).toHaveLength(1);
 });
+
+test('an owned capture server restarts behind the same browser origin, and shutdown cancels retries', async () => {
+  const {serveLive} = await import('../defaults/mods/devices/live.mjs');
+  const f = fixture();
+  let closed = 0, target;
+  const starting = serveLive(f.hub, {retryMs: 1, proxy: async get => {target = get; return {url:'http://127.0.0.1:49999/',close:async()=>{closed++;}};}});
+  await Promise.resolve();await Promise.resolve();
+  f.children[0].stdout.emit('data',Buffer.from('Local: http://localhost:45678\n'));
+  const service = await starting; expect(service.url).toBe('http://127.0.0.1:49999/');expect(target()).toBe('http://127.0.0.1:45678/');
+  f.children[0].emit('exit',1,null);expect(target()).toBeNull();
+  await new Promise(resolve=>setTimeout(resolve,10));
+  expect(f.children).toHaveLength(2);
+  f.children[1].stdout.emit('data',Buffer.from('Local: http://localhost:45679\n'));
+  await new Promise(resolve=>setTimeout(resolve,1));
+  expect(target()).toBe('http://127.0.0.1:45679/');expect(service.url).toBe('http://127.0.0.1:49999/');
+  await service.stop();await new Promise(resolve=>setTimeout(resolve,10));
+  expect(closed).toBe(1);expect(f.children).toHaveLength(2);expect(f.children[1].signals).toEqual(['SIGTERM']);
+});
+
+test('stream proxy injects frame monitoring, forwards requests only to its owned host, and reports restart availability', async () => {
+  const {createServer}=await import('node:http'), {streamProxy}=await import('../defaults/mods/devices/stream-proxy.mjs');
+  const paths=[];
+  const upstream=createServer((req,res)=>{paths.push(req.url);if(req.url==='/'){res.writeHead(200,{'content-type':'text/html'});res.end('<!doctype html><head></head><body>live</body>');}else{res.end('forwarded');}});
+  await new Promise(resolve=>upstream.listen(0,'127.0.0.1',resolve));
+  let address=`http://127.0.0.1:${upstream.address().port}/`;
+  const proxy=await streamProxy(()=>address);
+  try {
+    const page=await (await fetch(proxy.url)).text();expect(page).toContain('<head><script src="/_herdr/stream-client.js"></script>');
+    const script=await (await fetch(new URL('/_herdr/stream-client.js',proxy.url))).text();expect(script).toContain('CanvasRenderingContext2D');
+    expect(await (await fetch(new URL('/_herdr/stream-health',proxy.url))).json()).toMatchObject({available:true});
+    expect(await (await fetch(proxy.url+'//outside.invalid/same-host')).text()).toBe('forwarded');expect(paths.at(-1)).toEndWith('/same-host');
+    const health = new URL('/_herdr/stream-health',proxy.url);
+    await fetch(health,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({page:1,frames:17,status:'live',paintAgeMs:25})});
+    expect((await (await fetch(health)).json()).client).toMatchObject({page:1,frames:17,status:'live',paintAgeMs:25});
+    expect((await fetch(health,{method:'POST',body:JSON.stringify({frames:-1,status:'live'})})).status).toBe(400);
+    await new Promise(resolve=>upstream.close(resolve));
+    const failed=await fetch(proxy.url);expect(failed.status).toBe(503);expect(await failed.text()).toContain('data-herdr-reconnecting');
+    address=null;
+    expect(await (await fetch(new URL('/_herdr/stream-health',proxy.url))).json()).toMatchObject({available:false});
+    const unavailable=await fetch(proxy.url);expect(unavailable.status).toBe(503);expect(await unavailable.text()).toContain('/_herdr/stream-client.js');
+  }finally{await proxy.close();await new Promise(resolve=>upstream.close(resolve));}
+});
+
+
+test('visible stalled video recycles only its owned host, with a cooldown and cross-origin write rejection', async () => {
+  const {streamProxy}=await import('../defaults/mods/devices/stream-proxy.mjs');
+  let now=100000,restarts=0;
+  const proxy=await streamProxy(()=>null,{clock:()=>now,onStall:()=>{restarts++;}}),health=new URL('/_herdr/stream-health',proxy.url);
+  const report=async status=>{const response=await fetch(health,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({page:1,frames:10,paintAgeMs:0,visible:true,...status})});await response.json();};
+  try {
+    await report({status:'live'});now+=11000;
+    await report({status:'reconnecting',visible:false});expect(restarts).toBe(0);
+    await report({status:'reconnecting',paintAgeMs:11000});expect(restarts).toBe(1);
+    now+=1000;await report({status:'reconnecting'});expect(restarts).toBe(1);
+    now+=16000;await report({status:'reconnecting'});expect(restarts).toBe(2);
+    const foreign=await fetch(health,{method:'POST',headers:{origin:'https://outside.invalid'},body:'{}'});expect(foreign.status).toBe(403);
+  }finally{await proxy.close();}
+});

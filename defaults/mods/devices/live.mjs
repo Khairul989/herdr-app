@@ -1,15 +1,18 @@
 // One continuous device stream per panel. Device lifecycle remains with the agent's session.
 import { spawn } from 'node:child_process';
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, mkdir, writeFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { streamProxy } from './stream-proxy.mjs';
 
 export const HUB_VERSION = '0.23.1';
 
 export function hubArgs({ platform, device }) {
   if (!['ios', 'android'].includes(platform)) throw new Error('Choose an iOS simulator or Android device.');
   if (typeof device !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/.test(device)) throw new Error('An exact device ID is required.');
+  // Single-device middleware captures directly; the unpinned helper startup
+  // opens Simulator/DeviceHub even when its web sidebar is hidden.
   return ['--host', '127.0.0.1', '--port', '0', '--platform', platform, '--single-device', device,
     '--transport', 'h264', '--hide-sidebar', '--video-fps', '60', '--max-dimension', '1280'];
 }
@@ -101,29 +104,75 @@ export class LiveHub {
   }
 }
 
+// The browser origin survives a capture-host crash. Only this session's owned
+// server is restarted; the simulator and the app running inside it are untouched.
+export async function serveLive(hub, { proxy = streamProxy, retryMs = 1000 } = {}) {
+  await hub.start();
+  let closed = false, recycling = false, timer, attempts = 0;
+  const watch = () => {
+    if (!hub.child) { retry(); return; }
+    hub.child.once('exit', retry);
+  };
+  const retry = () => {
+    if (closed || recycling || timer) return;
+    timer = setTimeout(async () => {
+      timer = null;
+      if (closed) return;
+      try { await hub.start(); attempts = 0; watch(); }
+      catch { attempts++; retry(); }
+    }, Math.min(retryMs * 2 ** Math.min(attempts, 3), 8000));
+  };
+  const recycle = async () => {
+    if (closed || recycling) return;
+    recycling = true; clearTimeout(timer); timer = null;
+    try { await hub.stop(); if (!closed) { await hub.start(); attempts = 0; watch(); } }
+    catch { attempts++; }
+    finally { recycling = false; if (!closed && !hub.child) retry(); }
+  };
+  let gateway;
+  try { gateway = await proxy(() => hub.url, { onStall: recycle, device: hub.device, platform: hub.platform }); }
+  catch (error) { await hub.stop(); throw error; }
+  watch();
+  return { url: gateway.url, async stop() { closed = true; clearTimeout(timer); await gateway.close(); await hub.stop(); } };
+}
+
+export async function registerLive(hub, service) {
+  const directory = join(hub.toolsRoot, 'live');
+  await mkdir(directory, { recursive: true });
+  const path = join(directory, `${hub.platform}-${hub.device}-${process.pid}.json`);
+  await writeFile(`${path}.next`, JSON.stringify({ pid: process.pid, device: hub.device, platform: hub.platform, url: service.url }));
+  await rename(`${path}.next`, path);
+  return path;
+}
+
 // The native leaf owns stdin. Losing that pipe (including an app crash) releases
-// this server without closing the simulator or the agent's app session.
+// the proxy and its server without closing the simulator or app session.
 const entry = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
 if (entry && import.meta.url === pathToFileURL(entry).href) {
   const [toolsRoot, platform, device] = process.argv.slice(2);
   const hub = new LiveHub({ toolsRoot, platform, device });
-  const close = () => hub.stop().finally(() => process.exit(0));
+  let service, registration, closing = false;
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    (service ? service.stop() : hub.stop()).finally(async () => { if (registration) await unlink(registration).catch(() => {}); process.exit(0); });
+  };
   process.stdin.resume();
   process.stdin.on('end', close);
   process.on('SIGTERM', close);
   process.on('SIGINT', close);
-  hub.start().then(url => {
-    console.log(JSON.stringify({ url }));
-    hub.child?.once('exit', () => {
-      if (hub.closing) return;
-      console.log(JSON.stringify({ error: hub.error || 'Live stream server exited.' }));
-      process.exitCode = 1;
-      process.stdin.destroy();
-    });
+  serveLive(hub).then(async value => {
+    service = value;
+    if (closing) { await service.stop(); return; }
+    // Agent screenshots must reuse this capture instead of starting/stopping
+    // another SimCapture against the same simulator's display.
+    registration = await registerLive(hub, service);
+    if (closing) { await unlink(registration).catch(() => {}); return; }
+    console.log(JSON.stringify({ url: service.url }));
   }).catch(error => {
+    if (closing) return;
     console.log(JSON.stringify({ error: error.message }));
     process.exitCode = 1;
     process.stdin.destroy();
   });
 }
-
