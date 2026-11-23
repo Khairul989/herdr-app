@@ -121,6 +121,11 @@ export class DeviceSession {
   }
 
   async ensureLiveTools() {
+    if (this.device?.platform === "ios" && this.device.kind === "device") {
+      const r = await this.exec(this.node, [`${this.root}/mods/devices/physical-build.mjs`, `${this.root}/device-tools`], { timeout: 600000 });
+      if (r.code !== 0) throw new Error(r.stderr || r.stdout || "Could not prepare real-iPhone video. Screenshots remain available.");
+      return;
+    }
     try {
       const metadata = JSON.parse(await this.fs.readFile(`${this.root}/device-tools/node_modules/expo-device-hub/package.json`, "utf8"));
       if (metadata.version === LIVE_VERSION) return;

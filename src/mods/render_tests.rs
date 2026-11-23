@@ -510,7 +510,11 @@ fn devices_show_preview_first_and_keep_setup_behind_controls(cx: &mut TestAppCon
     }
     let phone = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.tools.device = {platform: 'ios', kind: 'device', id: 'phone'}; this.tools.opened = true;")).unwrap();
     assert!(phone.contains("Refresh capture"));
-    assert!(!phone.contains("Restart video"), "a physical iPhone has no live stream: {phone}");
+    assert!(phone.contains("Start live video"));
+    assert!(phone.contains("Experimental live iPhone video"));
+    let capture = describe(cx, &staged, "mods/devices", false, props(), updates("current", "current"), Some("this.tools.device = {platform: 'ios', kind: 'device', id: 'phone'}; this.tools.opened = true; this.liveReady = true; this.liveDevice = 'ios:device:phone'; this.showCapture = true; this.tools.frame = {path: '/tmp/fixture.png', width: 100, height: 200, capturedAt: 'fixture'};")).unwrap();
+    assert!(capture.contains("Show live video"));
+    assert!(capture.contains("Physical iPhone capture at fixture · screenshot"));
 }
 
 /// A mod's localStorage write lands on the executor; one that lands after the
@@ -945,6 +949,23 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
             assert!(tree.contains("check-app") && tree.contains("check-core"), "failed checks must remain retryable: {tree}");
         }
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
+    }
+    // A source-built core: always offered, then each step, then what happened.
+    for (updating, progress, outcome, expect) in [
+        (false, None, None, "Built from master in /src/herdr-core"),
+        (true, Some("Building herdr-core (a few minutes)"), None, "Building herdr-core (a few minutes)"),
+        (false, None, Some("Merged 3 new upstream commits with your patches"), "Merged 3 new upstream commits"),
+    ] {
+        let mut p = props();
+        p["section"] = json!("updates");
+        let mut u = updates("current", "current");
+        u["core"]["source"] = json!("master in /src/herdr-core");
+        u["core"]["updating"] = json!(updating);
+        u["core"]["progress"] = json!(progress);
+        u["core"]["outcome"] = json!(outcome);
+        let tree = describe(cx, &staged, "frame/settings", true, p, u, None).unwrap();
+        assert!(tree.contains(expect), "{expect}: {tree}");
+        assert_eq!(tree.contains("st-core-update"), !updating, "the button shows unless it is running: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
 }

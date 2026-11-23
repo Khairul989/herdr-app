@@ -70,6 +70,15 @@ test("discovery checks the pinned version before running any device operation", 
   expect(h.calls).toHaveLength(3);
 });
 
+test("physical iPhone video prepares its separate native tools without replacing the simulator hub", async () => {
+  const h = harness(); h.tools.select(ios);
+  await h.tools.ensureLiveTools();
+  expect(h.calls).toHaveLength(1);
+  expect(h.calls[0]).toMatchObject({ bin: "node", args: ["/app home/mods/devices/physical-build.mjs", "/app home/device-tools"], options: { timeout: 600000 } });
+  h.respond(() => ({ code: 1, stderr: "Xcode 27 is required", stdout: "" }));
+  await expect(h.tools.ensureLiveTools()).rejects.toThrow("Xcode 27");
+});
+
 test("every input and capture targets the selected physical phone and named session without a shell", async () => {
   const h = harness();
   h.tools.select(ios);

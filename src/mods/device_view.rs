@@ -292,6 +292,9 @@ mod macos {
     }
 
     fn valid_url(url: &str) -> bool {
+        // The optional phone credential is passed privately to the browser, never over HTTP.
+        let (url, token) = url.split_once('#').map_or((url, None), |(url, token)| (url, Some(token)));
+        if token.is_some_and(|token| token.len() != 32 || !token.bytes().all(|b| b.is_ascii_hexdigit())) { return false; }
         url.strip_prefix("http://127.0.0.1:").and_then(|s| s.strip_suffix('/'))
             .and_then(|s| s.parse::<u16>().ok()).is_some_and(|port| port != 0)
     }
@@ -317,7 +320,8 @@ mod macos {
         #[test]
         fn stream_address_is_an_exact_loopback_origin() {
             assert!(super::valid_url("http://127.0.0.1:3497/"));
-            for address in ["https://127.0.0.1:3497/", "http://127.0.0.1:0/", "http://localhost:3497/", "http://127.0.0.1:3497/other", "http://127.0.0.1:3497@evil.test/"] {
+            assert!(super::valid_url("http://127.0.0.1:3497/#0123456789abcdef0123456789abcdef"));
+            for address in ["https://127.0.0.1:3497/", "http://127.0.0.1:0/", "http://localhost:3497/", "http://127.0.0.1:3497/other", "http://127.0.0.1:3497@evil.test/", "http://127.0.0.1:3497/#", "http://127.0.0.1:3497/#secret", "http://127.0.0.1:3497/#0123456789abcdef0123456789abcdef#extra"] {
                 assert!(!super::valid_url(address), "{address}");
             }
         }

@@ -795,14 +795,17 @@ export default class Settings extends View {
     const core = c.managed
       ? [`Managed by ${c.managed}: update it there.${c.ready ? ` ${c.ready} is available.` : ""}`, u.checks ? check("st-check-core") : null]
       : c.updating
-        ? ["Updating\u2026 your terminals keep running.", null]
+        ? [`${c.progress ?? "Updating"}\u2026 your terminals keep running.`, null]
         : c.error
           ? [`The update failed: ${c.error}`, primary("st-core-retry", "Try again", () => run("app.update_core"))]
-          : c.ready
-            ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update herdr-core", () => run("app.update_core"))]
-            : u.checks
-              ? [result, check("st-check-core")]
-              : ["Not checked: a build from source looks for no updates.", null];
+          : c.source
+            // Built from source: updating merges upstream into it, so it is always offered.
+            ? [c.outcome ?? `Built from ${c.source}. Updating merges the latest herdr-core into it with your patches, rebuilds and restarts.`, primary("st-core-update", "Update from source", () => run("app.update_core"))]
+            : c.ready
+              ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update herdr-core", () => run("app.update_core"))]
+              : u.checks
+                ? [result, check("st-check-core")]
+                : ["Not checked: a build from source looks for no updates.", null];
     return v_flex()
       .w_full()
       .child(this.heading(t, "Herdr"))
