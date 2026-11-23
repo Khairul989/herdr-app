@@ -241,6 +241,15 @@ Show only this pane of its tab, or all again.
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `pane.focus`
 
 Focus a pane (or the pane showing a terminal).
@@ -257,6 +266,16 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 | Argument | Required |
 |---|---|
 | `direction` | yes |
+
+## `pane.resize`
+
+Move the border of a pane (default: the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `pane` | no |
+| `px` | no |
 
 ## `pane.swap`
 
@@ -525,7 +544,7 @@ No arguments.
 
 ## `app.update_core`
 
-Update herdr-core to its latest release of this generation; terminals keep running.
+Update herdr-core to its latest release of this generation (a source-built core: merge upstream and rebuild); terminals keep running.
 
 No arguments.
 

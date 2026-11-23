@@ -164,6 +164,9 @@ the highlighted line shows where it will land.
   mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  When the shown space is on another machine, the peek's Keep button uses the
+  nearest ancestor's space on the terminal's machine, or the first space there
+  if no ancestor has a pane there. Keep is hidden if that machine has no space.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
@@ -280,6 +283,9 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"link_handlers": ["my-browser", "my-viewer"]` chooses which mods
+  handle Ctrl-clicks (Cmd-clicks on macOS) in terminals, in order. Clone a
+  shipped layout before adding link handlers.
 - Root only: `"toast": "my-toast"` chooses the mod that shows notifications
   (Herdr's own and every `notify()`), in place of the shipped `toast`; an
   unknown mod logs a warning and falls back to `toast`. It gets the same
@@ -351,9 +357,10 @@ layout's look and a block can differ:
   are placed in their cells as Ghostty places them.
 - `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
   to 0.1..5), including mouse reports to programs. Small moves accumulate.
-- `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
-  (their text sizes are their own, in px, and follow zoom). Optional: without
-  them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
+- `font` / `font_size`: the terminals', the Files preview's and the Changes
+  diff's (px at zoom 1); `ui_font`: the mods' (their text sizes are their own,
+  in px, and follow zoom). Optional: without them a layout uses settings.json's,
+  else Herdr's (JetBrains Mono 14, Geist).
   Herdr (main) leaves these unset; Terminals sets text size 15, and Herdr 98
   brings its own fonts.
   JetBrains Mono, Geist Mono and Geist ship with Herdr; any installed font
@@ -396,9 +403,9 @@ The tab block says how each pane of the shown tab is wrapped:
   `pane.close`). `scroll` is `{ total, offset, len, from_bottom }` for a
   terminal pane's history viewport (`from_bottom` is 0 at the end; `scroll`
   is null on the alternate screen). Reads get current numbers. Mods refresh
-  on user scrolling and transitions between the end, history, and the
-  alternate screen; ordinary output within one of those states does not
-  refresh them just because the numbers changed. `position`: `top` or
+  only on transitions between the end, history, and the alternate screen;
+  scrolling and output within one of those states do not refresh them just
+  because the numbers changed. `position`: `top` or
   `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
   drawn over the terminal so the terminal never resizes. The shipped `pane`
   mod keeps its divider on the terminal-facing edge and reads the frame
@@ -578,9 +585,10 @@ The main ones:
 - Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}`
   (machine: another machine from `hc machine ls`; omitted: the focused space's
   machine for keys and clicks, this computer for scripts; `""`: this computer.
-  The space lives there, its
-  terminals start in that machine's home unless folder, and its tabs and
-  splits stay there; `spaces()` gives each space's `machine`, null here),
+  The space lives there, its tabs and splits stay there, and `spaces()` gives
+  each space's `machine`, null here. Without folder, its terminals start in
+  the focused terminal's folder when that terminal is on the same machine,
+  else in that machine's home),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
@@ -603,7 +611,10 @@ The main ones:
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
-  `pane.swap {pane?, direction | target}`.
+  `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
+  again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
+  the nearest border along that axis by px, default 40, as a drag would; a keyboard
+  resize mode is a mod that runs it on h/j/k/l).
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
   selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
@@ -882,8 +893,9 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 
 ```
 ~/.config/herdr-app/mods/<name>/
-  main.js       the mod (required)
-  mod.json    where it first appears: { "place": "right" | "left" | "top" | "bottom" | "none", "size": 320 }
+  main.js       the mod's view, if it has one
+  link.js       the terminal link handler, if it has one
+  mod.json      where it first appears: { "place": "right" | "left" | "top" | "bottom" | "none", "size": 320 }
   *.js, *.svg   more modules ("./ui.js"), its own icons
 ```
 
@@ -1096,14 +1108,47 @@ operate a session concurrently. Agent panel connections and preview handoffs liv
 state lives in `device-tools/state/`. The same panel restores its session on reload.
 No simulator is powered off by the mod.
 
+### Terminal link handlers
+
+In `mod.json`, declare what the mod can open:
+
+```json
+{"place":"none","link_handlers":[{"kind":"file","pattern":"(?i)\\.png$"}]}
+```
+
+Herdr offers the same URLs and paths it detects for native clicks, including
+recognized paths that are missing or remote. Ctrl-click (Cmd-click on macOS)
+sends the link to matching handlers. Adding Shift uses the native preview
+or opener when one is available. Rules use Rust regex search.
+File rules match decoded `file:` paths, and URL rules match the full URI.
+Each mod gets the link kind from its first matching rule. Plain paths use the
+native diagnostic suffix fallback. Bare filenames and backslash paths are skipped.
+The first time a mod has link rules on a personal layout, Herdr adds it to
+that layout. Edit `link_handlers` to reorder or remove it.
+
+Export `handleLink(click)` from `link.js` (it can be async). It receives
+`{link, source}` and can import the usual functions from `"herdr"`. The source
+names the clicked terminal and its machine, cwd, pane, tab and space.
+`link.raw` keeps the original text or the OSC 8 destination. `link.path` is
+null for remote, unresolved or non-UTF-8 paths. For a file URI, Herdr can verify
+a local path when the host is empty or `localhost`. A link handler starts without opening
+a view and shares `localStorage` with views of the same mod with null props.
+Return `"handled"` when done or `"pass"` to try the next matching mod.
+If all pass, a local terminal uses the usual opener target. A matched file
+from a remote terminal has no opener target. A handler has 30 seconds to
+answer. A load or handler error stops the click, shows a toast and appears in
+`herdr-app status`.
+
 ### Check before you finish
 
 ```sh
 herdr-app check ~/.config/herdr-app/mods/<name>
 ```
 
-Loads the mod, renders it once, exits nonzero with the exact error. Run it
-after every change. Never call a mod done without a passing check.
+Loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it verifies that `link.js`
+exports `handleLink` without running the module or its imports. It exits
+nonzero with the exact error. Run it after every change.
 
 `init()` runs for real during a check. Import `checking` from `"herdr"` and
 use `if (checking()) return;` before starting helpers or writing files.
@@ -1154,7 +1199,8 @@ Rules:
   theme, shared state). Don't poll those.
 - Module code runs once per source version and is shared by copies, even after all
   copies close. Keep instance state and host calls in constructor/init, not module
-  scope. Each copy still gets its own instance, tasks and localStorage.
+  scope. Each copy gets its own instance and tasks. Views with the same mod
+  and props share live `localStorage` values.
 - **Never keep a `cx` and use it later.** Every callback gets its own:
   `on_click((event, cx) => …)`, `cx.spawn(async (cx) => …)`,
   `cx.timer.every(ms, (cx) => …)`.
@@ -1324,7 +1370,7 @@ All of it is in `herdr.d.ts`. In short:
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
 
 Mods are trusted code: commands and network access (including `fetch`) are unrestricted.
-Other built-ins: `localStorage` (per mod copy), `console.log`, `fetch`,
+Other built-ins: `localStorage` (shared by mod and props), `console.log`, `fetch`,
 `import * as fs from "fs/promises"` (read in home, write under `~/.config/herdr-app`).
 
 ## herdr-core (`hc`)
